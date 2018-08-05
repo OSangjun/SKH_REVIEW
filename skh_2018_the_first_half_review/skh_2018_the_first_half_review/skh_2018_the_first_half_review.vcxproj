@@ -118,6 +118,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="skh02.cpp" />
+    <ClCompile Include="skh03.cpp" />
     <ClCompile Include="skh04.cpp" />
     <ClCompile Include="skh05.cpp" />
     <ClCompile Include="skh06.cpp" />
