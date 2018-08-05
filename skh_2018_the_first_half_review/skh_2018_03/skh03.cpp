@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-
 struct node {
 	int val;
 	int idx;
@@ -85,7 +84,7 @@ int main() {
 		cnt++;
 	}
 	idx = p->idx;
-	printf("Target value : %d -> (%c).\nTarget index : %d\ncnt : %d.\n", target, target==p->val?'O':'X' ,idx,cnt);
-
+	printf("Target value : %d -> (%s).\nTarget index : %d\ncnt : %d.\n", target, target==p->val?"success":"fail" ,idx,cnt);
+	system("pause");
 	return 0;
 }

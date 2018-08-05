@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include <stdio.h>
 
+#include <stdio.h>
+#include <stdlib.h>
 
 int hextodec(char* phex, int pos) {
 	int v = 0;
@@ -32,15 +33,14 @@ int cntPos(char* phex) {
 int main() {
 	char strinput[10];
 	int val = 0, cnt = 0;
+	// GET INPUT
 	scanf("%s",strinput);
 	
-	//printf("입력 : %s\n", strinput);
-
 	// convert to decimal
 	cnt = cntPos(strinput + 2);
-	//printf("pos : %d\n", cnt);
 	val = hextodec(strinput+2,cnt-1);
 
 	printf("결과 : %d\n", val);
+	system("pause");
 	return 0;
 }
