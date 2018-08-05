@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="skh02.cpp">
+    <ClCompile Include="..\skh_2018_the_first_half_review\skh05.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>
