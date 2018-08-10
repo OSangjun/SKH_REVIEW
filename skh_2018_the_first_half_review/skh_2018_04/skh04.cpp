@@ -45,10 +45,11 @@ int main() {
 	int dec1 = hextodec(hex1+2,cnt1-1);
 	int dec2 = hextodec(hex2+2, cnt2-1);
 	
-	
+	int diff = dec1 - dec2;
+	int ans = (diff & 1 << 31) == 0 ? 0 : 1;
 
 	printf("dec : %d , %d \n", dec1, dec2);
-	printf("diff : %d", dec1 - dec2);
+	printf("diff : %d",ans);
 
 
 	system("pause");
