@@ -1,46 +1,34 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
-#include <stdlib.h>
 // MAX : 100,000
 
-
-void sort(int *p,int len) {
-	int maxi, tmp;
-	for (int i = 0; i < len; i++) {
-		maxi = i;
-		for (int j = i + 1; j < len; j++) {
-			if (p[maxi] < p[j]) {
-				maxi = j;
-			}
-		}
-		tmp = p[i];
-		p[i] = p[maxi];
-		p[maxi] = tmp;
-	}
-}
-
 int main() {
-	int n, k, coin[100], d[10001];
-	int use[100] = {0};
-	unsigned int ans;
+	int n, k, coin[100], d[10001] = { 0 };
+
+
 	scanf("%d %d", &n, &k);
 
-	for (int i = 0; i < n; i++)
+	d[0] = 1;
+	for (int i = 0; i < n; i++) {
 		scanf("%d", coin + i);
-
-	// sort
-	sort(coin, n);
-
-	//init 
-	int tot = k;
-	for (int i = n - 1; tot == 0 ; i--) {
-		use[i] = tot / coin[i];
-		tot -= coin[i] * use[i];
 	}
 
-	// sequence
-	
 
-	system("pause");
+	// DP
+	int val = 0;
+	for (int c = 0; c < n; c++) {
+		val = coin[c];
+		/*printf("%d : ", val);
+		for (int i = 1; i < val; i++)
+			printf("%d ",d[i]);*/
+		for (int i = val; i <= k; i++) {
+			d[i] += d[i - val] ;
+			//printf("%d ", d[i]);
+		}
+		//printf("\n");
+	}
+	printf("%d", d[k]);
+
+//	system("pause");
 	return 0;
 }

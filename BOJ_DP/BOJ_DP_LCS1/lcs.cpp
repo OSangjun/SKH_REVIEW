@@ -4,23 +4,6 @@
 char str0[1001], str1[1001];
 int table[1001][1001];
 int len0, len1, last1 = -1, last0 = -1;
-//char mark[1001][1001];
-//char getLCS(int row, int col) {
-//	int length = table[row][col];
-//	for (int i = col; i < len0; i++) {
-//		if ('*' == mark[row][i]) {
-//			printf("%c", str0[col]);
-//			return getLCS  (row + 1, i + 1);
-//		}
-//	}
-//	for (int i = row; i < len1; i++) {
-//		if ('*' == mark[row][i]) {
-//			printf("%c", str1[row]);
-//			return getLCS(i+ 1, col+ 1);
-//		}
-//	}
-//	return 0;
-//}
 
 int main() {
 	// get input
@@ -28,7 +11,6 @@ int main() {
 	scanf("%s", str0);
 	fflush(stdin);
 	scanf("%s", str1);
-
 
 	// init
 	len0 = 0; len1 = 0;
@@ -49,20 +31,17 @@ int main() {
 			hit = (str1[i-1] == str0[j-1]);
 			if (hit) {
 				table[i][j] = table[i-1][j-1]+1;
-				//mark[i][j] = '*';
 			}
 			else {
 				table[i][j] = MAX(table[i][j - 1], table[i - 1][j]);
 			}
-		//	printf("%d ", table[i][j]);
+			//printf("%d", table[i][j]);
 		}
 		//printf("\n");
 	}
-	//get lcs
-	//getLCS( 0, 0);
 
 	// print result.
-	printf("%d", table[len0][len1]);
+	printf("%d", table[len1][len0]);
 
 	return 0;
 }
