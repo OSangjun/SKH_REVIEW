@@ -15,7 +15,7 @@ struct node {
 void addNode(node* p, node* newnode, int d){
 	if (p->val <= newnode->val ) {
 		if (p->prev) {
-			addNode(p->prev,newnode,)
+			addNode(p->prev, newnode,NULL);
 		}
 		else {
 
@@ -31,7 +31,7 @@ int main() {
 	int v[5000];
 	int len;
 	scanf("%d %d", &N,&K);
-
+	len = 0;
 	while (len < N) {
 		scanf("%d", v+len%K);
 		len++;
