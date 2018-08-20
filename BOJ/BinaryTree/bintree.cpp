@@ -12,7 +12,7 @@ struct node {
 		r = _r;
 		key = k;
 	}
-};
+}; 
 
 int addNode(node* root, int key) {
 	if (root->key > key) {
@@ -58,7 +58,6 @@ int main() {
 	}
 
 	// Post-order traversal
-	
 	post(root);
 
 #ifdef _DEBUG

@@ -4,18 +4,16 @@
 int main() {
 
 	int num = 0;
-	char ch, last;
+	char str[1000001];
 	
-	last = getchar();
-	while (  (ch = getchar()) != '\n' ) {
-		if (ch == ' ' && last != ' ') {
-			num++;
-		}
-		last = ch;
+	while (scanf("%s", str) != EOF) {
+		num++;
 	}
+	printf("%d", num);
 
-	printf("%d ", num+1);
+#ifdef _DEBUG
 	system("pause");
+#endif
 
 	return 0;
 }
