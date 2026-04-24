@@ -34,33 +34,33 @@ async function record(url, outputFile) {
 
   await page.exposeFunction('__recorderPush', pushEvent);
 
-  page.on('load', async () => {
-    try {
-      await injectListeners(page);
-    } catch (_) {
-      // frame may have navigated away
+  // Fix B5: register script once via evaluateOnNewDocument (runs on every navigation
+  // automatically). No need for a separate load handler calling evaluate() again.
+  await page.evaluateOnNewDocument(buildListenerScript());
+
+  // Fix U1: capture page navigations as 'navigate' events in the recording.
+  let lastUrl = url;
+  page.on('framenavigated', frame => {
+    if (frame !== page.mainFrame()) return;
+    const newUrl = frame.url();
+    if (newUrl === lastUrl || newUrl === 'about:blank') return;
+    lastUrl = newUrl;
+    if (startTime !== null) {
+      events.push({ type: 'navigate', url: newUrl, t: Date.now() - startTime });
+      process.stdout.write(`\r[Recorder] Events captured: ${events.length}   `);
     }
   });
-
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
-  await injectListeners(page);
 
   browser.on('disconnected', () => {
     finalize(events, outputFile);
   });
 
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
+
   await browser.waitForTarget(() => false).catch(() => {});
 }
 
-async function injectListeners(page) {
-  await page.evaluateOnNewDocument(buildListenerScript());
-  await page.evaluate(buildListenerScript());
-}
-
 function buildListenerScript() {
-  const throttleMs_move = MOUSEMOVE_THROTTLE_MS;
-  const throttleMs_scroll = SCROLL_THROTTLE_MS;
-
   return `(function() {
     if (window.__recorderActive) return;
     window.__recorderActive = true;
@@ -93,7 +93,7 @@ function buildListenerScript() {
 
     document.addEventListener('mousemove', e => {
       const now = ts();
-      if (now - lastMove < ${throttleMs_move}) return;
+      if (now - lastMove < ${MOUSEMOVE_THROTTLE_MS}) return;
       lastMove = now;
       push({ type: 'mousemove', timestamp: now, x: e.clientX, y: e.clientY });
     }, true);
@@ -104,7 +104,7 @@ function buildListenerScript() {
 
     window.addEventListener('scroll', () => {
       const now = ts();
-      if (now - lastScroll < ${throttleMs_scroll}) return;
+      if (now - lastScroll < ${SCROLL_THROTTLE_MS}) return;
       lastScroll = now;
       push({ type: 'scroll', timestamp: now, scrollX: window.scrollX, scrollY: window.scrollY });
     }, true);
@@ -130,6 +130,9 @@ function buildListenerScript() {
       const el = e.target;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
         push({ type: 'input', timestamp: ts(), value: el.value });
+      } else if (el && el.isContentEditable) {
+        // Fix U2: capture contentEditable (rich text editors)
+        push({ type: 'contenteditable', timestamp: ts(), html: el.innerHTML, text: el.innerText });
       }
     }, true);
 

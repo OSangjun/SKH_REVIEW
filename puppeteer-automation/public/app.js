@@ -2,11 +2,14 @@
 (function () {
   'use strict';
 
+  const MAX_EVENTS = 10000; // Fix P2: hard cap to prevent memory runaway
+
   // ── DOM refs ────────────────────────────────────────────────────────────────
   const urlInput      = document.getElementById('url-input');
   const goBtn         = document.getElementById('go-btn');
   const recordBtn     = document.getElementById('record-btn');
   const headerReplay  = document.getElementById('replay-btn');
+  const speedSelect   = document.getElementById('speed-select'); // Fix U6
   const frame         = document.getElementById('browser-frame');
   const frameUrlLabel = document.getElementById('frame-url');
   const recBadge      = document.getElementById('rec-badge');
@@ -17,10 +20,12 @@
   // ── State ───────────────────────────────────────────────────────────────────
   let isRecording        = false;
   let capturedEvents     = [];
-  let currentProxyUrl    = '';   // /proxy?url=... loaded in iframe
-  let currentRealUrl     = '';   // actual target URL
+  let currentRealUrl     = '';
   let selectedId         = null;
-  let recordings         = [];   // [{id,name,url,eventCount,createdAt}, ...]
+  let recordings         = [];
+  let replayingName      = '';
+  let recordingStartTime = null; // Fix U1
+  let initialInjectDone  = false; // Fix U1: detect first vs subsequent INJECT_READY
 
   // ── Status helper ───────────────────────────────────────────────────────────
   function setStatus(msg) { statusText.textContent = msg; }
@@ -31,20 +36,25 @@
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
 
-    currentRealUrl   = url;
-    currentProxyUrl  = `/proxy?url=${encodeURIComponent(url)}`;
-    urlInput.value   = url;
+    currentRealUrl = url;
+    urlInput.value = url;
     frameUrlLabel.textContent = url;
-    frame.src        = currentProxyUrl;
+    frame.src = `/proxy?url=${encodeURIComponent(url)}`;
     setStatus(`로드 중: ${url}`);
   }
 
-  // ── Iframe load tracking ───────────────────────────────────────────────────
+  // ── Iframe load event (Fix U7: detect proxy error page) ───────────────────
   frame.addEventListener('load', () => {
     try {
-      // Extract real URL from proxy path inside the iframe
-      const iframePath = frame.contentWindow?.location?.href || '';
-      const m = iframePath.match(/[?&]url=([^&]+)/);
+      const doc = frame.contentDocument;
+      // Fix U7: proxy sets data-proxy-error="true" on error pages
+      if (doc?.documentElement?.dataset?.proxyError) {
+        setStatus('⚠️ 페이지를 불러올 수 없습니다. URL을 확인하거나 다른 URL을 시도하세요.');
+        return;
+      }
+      // Update URL bar from iframe location
+      const href = frame.contentWindow?.location?.href || '';
+      const m = href.match(/[?&]url=([^&]+)/);
       if (m) {
         const real = decodeURIComponent(m[1]);
         currentRealUrl = real;
@@ -52,34 +62,60 @@
         urlInput.value = real;
       }
     } catch {}
-
-    if (isRecording) {
-      // Page navigated during recording — re-send START so inject.js picks it up
-      sendCtrl({ cmd: 'START' });
-    }
   });
 
   // ── postMessage from iframe (inject.js) ─────────────────────────────────────
   window.addEventListener('message', e => {
+    // Fix D1: only accept messages from our own iframe
+    if (e.source !== frame.contentWindow) return;
     const d = e.data;
     if (!d) return;
 
-    if (d.__rtype === 'RECORDER_EVENT' && isRecording) {
+    if (d.__rtype === 'RECORDER_EVENT') {
+      if (!isRecording) return;
+      // Fix P2: enforce max event cap
+      if (capturedEvents.length >= MAX_EVENTS) {
+        setStatus(`⚠️ 최대 이벤트 수(${MAX_EVENTS})에 도달했습니다. 녹화를 자동 중지합니다.`);
+        stopRecording();
+        return;
+      }
       capturedEvents.push(d.event);
       setStatus(`녹화 중… ${capturedEvents.length}개 이벤트 캡처됨`);
       return;
     }
 
     if (d.__rtype === 'INJECT_READY') {
-      setStatus(`페이지 준비됨: ${d.url || currentRealUrl}`);
-      frameUrlLabel.textContent = d.url || currentRealUrl;
-      if (isRecording) sendCtrl({ cmd: 'START' });
+      const pageUrl = d.url || currentRealUrl;
+      frameUrlLabel.textContent = pageUrl;
+
+      if (isRecording) {
+        // Fix U1: record a navigate event for pages after the first load
+        if (initialInjectDone && capturedEvents.length > 0) {
+          capturedEvents.push({
+            type: 'navigate',
+            url: pageUrl,
+            t: Date.now() - recordingStartTime,
+          });
+        } else {
+          initialInjectDone = true;
+        }
+        sendCtrl({ cmd: 'START' });
+        setStatus(`녹화 중… ${capturedEvents.length}개 이벤트 캡처됨`);
+      } else {
+        setStatus(`페이지 준비됨: ${pageUrl}`);
+      }
+      return;
+    }
+
+    // Fix D5: real progress from inject.js (not approximated)
+    if (d.__rtype === 'REPLAY_PROGRESS') {
+      showReplayOverlay(replayingName, d.done, d.total);
       return;
     }
 
     if (d.__rtype === 'REPLAY_DONE') {
       hideReplayOverlay();
-      setStatus('재생 완료.');
+      setStatus(`재생 완료 — ${replayingName}`);
       headerReplay.disabled = false;
       return;
     }
@@ -97,8 +133,10 @@
       setStatus('먼저 URL을 입력하고 이동하세요.');
       return;
     }
-    isRecording    = true;
-    capturedEvents = [];
+    isRecording        = true;
+    capturedEvents     = [];
+    recordingStartTime = Date.now(); // Fix U1
+    initialInjectDone  = false;      // Fix U1
     recordBtn.classList.add('active');
     recordBtn.innerHTML = '<span class="dot"></span> 중지';
     recBadge.classList.remove('hidden');
@@ -121,7 +159,7 @@
 
     setStatus(`저장 중… (${capturedEvents.length}개 이벤트)`);
     try {
-      const res  = await fetch('/api/recordings', {
+      const res = await fetch('/api/recordings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -141,7 +179,7 @@
     }
   }
 
-  // ── Replay (in-browser via inject.js) ───────────────────────────────────────
+  // ── In-browser replay (Fix U1: multi-page segment replay) ─────────────────
   async function replayInBrowser(id) {
     const meta = recordings.find(r => r.id === id);
     if (!meta) return;
@@ -149,49 +187,64 @@
     selectedId = id;
     renderList();
     headerReplay.disabled = true;
+    replayingName = meta.name;
     showReplayOverlay(meta.name, 0, meta.eventCount);
 
     try {
       const res = await fetch(`/api/recordings/${id}`);
       const rec = await res.json();
 
-      // Navigate to recorded URL
-      navigate(rec.url);
+      // Fix U6: read speed from slider
+      const speed = parseFloat(speedSelect?.value ?? '1');
 
-      // Wait for inject.js to signal ready
-      await waitForInjectReady(6000);
-      await sleep(300);
+      // Fix U1: split events at navigate boundaries → replay segment by segment
+      const segments = splitByNavigate(rec.url, rec.events);
 
-      // Stream progress updates while replaying
-      let done = 0;
-      const total = rec.events.length;
+      for (const seg of segments) {
+        navigate(seg.url);
+        await waitForInjectReady(6000);
+        await sleep(300);
 
-      // Intercept REPLAY_DONE to update progress overlay
-      const progressHandler = e => {
-        if (e.data?.__rtype === 'RECORDER_EVENT') return; // ignore
-        if (e.data?.__rtype === 'REPLAY_DONE') return;    // handled elsewhere
-      };
-      window.addEventListener('message', progressHandler);
+        if (seg.events.length === 0) continue;
 
-      sendCtrl({ cmd: 'REPLAY', events: rec.events, speedFactor: 1.0 });
+        const timeout = Math.max(30000, seg.events.length * 200);
+        const donePromise = waitForReplayDone(timeout);
 
-      // Approximate progress by polling event count
-      const interval = setInterval(() => {
-        done = Math.min(done + Math.ceil(total / 20), total);
-        showReplayOverlay(meta.name, done, total);
-        if (done >= total) clearInterval(interval);
-      }, 200);
+        sendCtrl({ cmd: 'REPLAY', events: seg.events, speedFactor: speed });
 
+        await donePromise;
+      }
+
+      hideReplayOverlay();
+      setStatus(`재생 완료 — ${rec.name}`);
     } catch (err) {
       hideReplayOverlay();
       setStatus('재생 실패: ' + err.message);
+    } finally {
       headerReplay.disabled = false;
     }
+  }
+
+  // Fix U1: split events array at navigate markers
+  function splitByNavigate(startUrl, events) {
+    const segments = [];
+    let current = { url: startUrl, events: [] };
+    for (const ev of events) {
+      if (ev.type === 'navigate') {
+        segments.push(current);
+        current = { url: ev.url, events: [] };
+      } else {
+        current.events.push(ev);
+      }
+    }
+    segments.push(current);
+    return segments;
   }
 
   function waitForInjectReady(timeoutMs) {
     return new Promise(resolve => {
       const handler = e => {
+        if (e.source !== frame.contentWindow) return;
         if (e.data?.__rtype === 'INJECT_READY') {
           window.removeEventListener('message', handler);
           resolve();
@@ -202,14 +255,29 @@
     });
   }
 
-  // ── Puppeteer replay (server-side) ──────────────────────────────────────────
+  function waitForReplayDone(timeoutMs) {
+    return new Promise(resolve => {
+      const handler = e => {
+        if (e.source !== frame.contentWindow) return;
+        if (e.data?.__rtype === 'REPLAY_DONE') {
+          window.removeEventListener('message', handler);
+          resolve();
+        }
+      };
+      window.addEventListener('message', handler);
+      setTimeout(() => { window.removeEventListener('message', handler); resolve(); }, timeoutMs);
+    });
+  }
+
+  // ── Puppeteer replay ─────────────────────────────────────────────────────────
   async function replayPuppeteer(id) {
     try {
       setStatus('Puppeteer 재생 요청 중…');
+      const speed = parseFloat(speedSelect?.value ?? '1'); // Fix U6
       const res = await fetch(`/api/replay/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speedFactor: 1.0 }),
+        body: JSON.stringify({ speedFactor: speed }),
       });
       const data = await res.json();
       setStatus(data.message || 'Puppeteer 재생 시작됨.');
@@ -218,7 +286,43 @@
     }
   }
 
-  // ── Delete recording ─────────────────────────────────────────────────────────
+  // ── Export (Fix U5) ────────────────────────────────────────────────────────
+  async function exportJson(id) {
+    try {
+      const res = await fetch(`/api/recordings/${id}`);
+      const rec = await res.json();
+      const meta = recordings.find(r => r.id === id);
+      const blob = new Blob([JSON.stringify(rec, null, 2)], { type: 'application/json' });
+      triggerDownload(blob, `${safeName(meta?.name)}.json`);
+      setStatus(`JSON 내보내기 완료 — ${meta?.name}`);
+    } catch (err) {
+      setStatus('JSON 내보내기 실패: ' + err.message);
+    }
+  }
+
+  function exportScript(id) {
+    const meta = recordings.find(r => r.id === id);
+    const a = document.createElement('a');
+    a.href = `/api/recordings/${id}/export/puppeteer`;
+    a.download = `${safeName(meta?.name)}.js`;
+    a.click();
+    setStatus(`Puppeteer 스크립트 내보내기 — ${meta?.name}`);
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function safeName(name) {
+    return (name || 'recording').replace(/[^\w\s-]/g, '_');
+  }
+
+  // ── Delete ───────────────────────────────────────────────────────────────────
   async function deleteRecording(id) {
     try {
       await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
@@ -244,12 +348,13 @@
       overlay.innerHTML = `
         <div class="ov-box">
           <div class="ov-title">▶ 재생 중</div>
-          <div class="ov-name" style="font-size:13px;margin-bottom:10px;color:#aaa"></div>
-          <div class="ov-progress"></div>
+          <div class="ov-name"></div>
+          <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-fill"></div></div>
+          <div class="ov-progress" id="ov-progress">준비 중…</div>
           <button class="ov-cancel">취소</button>
         </div>`;
       overlay.querySelector('.ov-cancel').addEventListener('click', () => {
-        sendCtrl({ cmd: 'STOP_REPLAY' });
+        sendCtrl({ cmd: 'STOP_REPLAY' }); // Fix B4
         hideReplayOverlay();
         headerReplay.disabled = false;
         setStatus('재생 취소됨.');
@@ -257,8 +362,10 @@
       document.body.appendChild(overlay);
     }
     overlay.querySelector('.ov-name').textContent = name;
-    overlay.querySelector('.ov-progress').textContent =
-      total > 0 ? `${done} / ${total} 이벤트` : '준비 중…';
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    overlay.querySelector('#ov-fill').style.width = `${pct}%`;
+    overlay.querySelector('#ov-progress').textContent =
+      total > 0 ? `${done} / ${total} 이벤트 (${pct}%)` : '준비 중…';
     overlay.classList.add('visible');
   }
 
@@ -280,22 +387,24 @@
       .reverse()
       .map(rec => {
         const isSelected = rec.id === selectedId;
-        const shortUrl   = trimUrl(rec.url);
-        const time       = fmtTime(rec.createdAt);
         return `
 <div class="rec-item${isSelected ? ' selected' : ''}" data-id="${rec.id}">
   <div class="rec-item-head">
     <span class="rec-num">#${rec.id}</span>
     <button class="rec-del" data-id="${rec.id}" title="삭제">✕</button>
   </div>
-  <span class="rec-url" title="${esc(rec.url)}">${esc(shortUrl)}</span>
+  <span class="rec-url" title="${esc(rec.url)}">${esc(trimUrl(rec.url))}</span>
   <div class="rec-meta">
     <span>${rec.eventCount}개 이벤트</span>
-    <span>${time}</span>
+    <span>${fmtTime(rec.createdAt)}</span>
   </div>
   <div class="rec-actions">
     <button class="btn-rec-replay"    data-id="${rec.id}">▶ 재생</button>
-    <button class="btn-rec-puppeteer" data-id="${rec.id}" title="Puppeteer로 실제 브라우저에서 재생">🤖 Puppeteer</button>
+    <button class="btn-rec-puppeteer" data-id="${rec.id}" title="Puppeteer로 실제 브라우저에서 재생">🤖</button>
+  </div>
+  <div class="rec-export">
+    <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">📥 JSON</button>
+    <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">📜 Script</button>
   </div>
 </div>`;
       })
@@ -304,15 +413,19 @@
 
   // ── Event delegation for list ────────────────────────────────────────────────
   recList.addEventListener('click', e => {
-    const delBtn  = e.target.closest('.rec-del');
-    const repBtn  = e.target.closest('.btn-rec-replay');
-    const pupBtn  = e.target.closest('.btn-rec-puppeteer');
-    const item    = e.target.closest('.rec-item');
+    const del    = e.target.closest('.rec-del');
+    const rep    = e.target.closest('.btn-rec-replay');
+    const pup    = e.target.closest('.btn-rec-puppeteer');
+    const xjson  = e.target.closest('.btn-rec-json');
+    const xscript= e.target.closest('.btn-rec-script');
+    const item   = e.target.closest('.rec-item');
 
-    if (delBtn)  { e.stopPropagation(); deleteRecording(+delBtn.dataset.id);  return; }
-    if (repBtn)  { e.stopPropagation(); replayInBrowser(+repBtn.dataset.id);  return; }
-    if (pupBtn)  { e.stopPropagation(); replayPuppeteer(+pupBtn.dataset.id);  return; }
-    if (item)    {
+    if (del)     { e.stopPropagation(); deleteRecording(+del.dataset.id);  return; }
+    if (rep)     { e.stopPropagation(); replayInBrowser(+rep.dataset.id);  return; }
+    if (pup)     { e.stopPropagation(); replayPuppeteer(+pup.dataset.id);  return; }
+    if (xjson)   { e.stopPropagation(); exportJson(+xjson.dataset.id);     return; }
+    if (xscript) { e.stopPropagation(); exportScript(+xscript.dataset.id); return; }
+    if (item) {
       selectedId = +item.dataset.id;
       headerReplay.disabled = false;
       renderList();

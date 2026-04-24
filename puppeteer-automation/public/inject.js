@@ -5,28 +5,43 @@
 
   const MOVE_THROTTLE_MS   = 50;
   const SCROLL_THROTTLE_MS = 100;
+  // Progress notification every N events to avoid postMessage flood
+  const PROGRESS_EVERY = 5;
 
-  let recording    = false;
-  let startTime    = null;
-  let lastMoveAt   = 0;
-  let lastScrollAt = 0;
+  let recording      = false;
+  let startTime      = null;
+  let lastMoveAt     = 0;
+  let lastScrollAt   = 0;
+  let replayAborted  = false; // Fix B4
 
-  // ── Send event to parent ──────────────────────────────────────────────────
+  // ── Fix D2: only accept parent-origin messages ────────────────────────────
+  const PARENT = window.parent;
 
+  function sendToParent(msg) {
+    try { PARENT.postMessage(msg, '*'); } catch {}
+  }
+
+  // ── Send captured event to parent ─────────────────────────────────────────
   function emit(data) {
     if (!recording) return;
     const now = Date.now();
     if (startTime === null) startTime = now;
-    try {
-      window.parent.postMessage(
-        { __rtype: 'RECORDER_EVENT', event: { ...data, t: now - startTime } },
-        '*'
-      );
-    } catch {}
+    sendToParent({ __rtype: 'RECORDER_EVENT', event: { ...data, t: now - startTime } });
   }
 
   function btnName(b) {
     return b === 2 ? 'right' : b === 1 ? 'middle' : 'left';
+  }
+
+  // ── Fix U4: pierce shadow DOM to get true target element ──────────────────
+  function elementAtPoint(x, y) {
+    let el = document.elementFromPoint(x, y);
+    while (el && el.shadowRoot) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
   }
 
   // ── Capture listeners ─────────────────────────────────────────────────────
@@ -71,8 +86,13 @@
 
   document.addEventListener('input', e => {
     const el = e.target;
-    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'))
+    if (!el) return;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
       emit({ type: 'input', value: el.value });
+    } else if (el.isContentEditable) {
+      // Fix U2: capture rich-text / contenteditable elements
+      emit({ type: 'contenteditable', html: el.innerHTML, text: el.innerText });
+    }
   }, true);
 
   document.addEventListener('change', e => {
@@ -83,14 +103,16 @@
   // ── Commands from parent ──────────────────────────────────────────────────
 
   window.addEventListener('message', async e => {
+    // Fix D2: only accept messages originating from our parent frame
+    if (e.source !== PARENT) return;
     const d = e.data;
     if (!d || d.__rfrom !== 'RECORDER_CTRL') return;
 
     switch (d.cmd) {
       case 'START':
-        recording  = true;
-        startTime  = null;
-        lastMoveAt = 0;
+        recording    = true;
+        startTime    = null;
+        lastMoveAt   = 0;
         lastScrollAt = 0;
         break;
 
@@ -99,8 +121,14 @@
         break;
 
       case 'REPLAY':
+        replayAborted = false;
         await runReplay(d.events || [], d.speedFactor || 1.0);
-        try { window.parent.postMessage({ __rtype: 'REPLAY_DONE' }, '*'); } catch {}
+        sendToParent({ __rtype: 'REPLAY_DONE' });
+        break;
+
+      // Fix B4: abort in-progress replay
+      case 'STOP_REPLAY':
+        replayAborted = true;
         break;
     }
   });
@@ -109,11 +137,22 @@
 
   async function runReplay(events, speedFactor) {
     let lastT = 0;
-    for (const ev of events) {
+    const total = events.length;
+
+    for (let i = 0; i < total; i++) {
+      if (replayAborted) break;
+
+      const ev = events[i];
       const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
       if (delay > 0) await sleep(delay);
       lastT = ev.t ?? 0;
+
       simulate(ev);
+
+      // Fix D5: send real progress (throttled to avoid message flood)
+      if (i % PROGRESS_EVERY === 0 || i === total - 1) {
+        sendToParent({ __rtype: 'REPLAY_PROGRESS', done: i + 1, total });
+      }
     }
   }
 
@@ -124,20 +163,21 @@
       case 'mouseup':
       case 'click':
       case 'dblclick': {
-        const el = document.elementFromPoint(ev.x, ev.y);
+        // Fix U4: use shadow-DOM-piercing helper
+        const el = elementAtPoint(ev.x, ev.y);
         if (!el) break;
         if (ev.type === 'click' || ev.type === 'mousedown') el.focus?.();
-        if (ev.type === 'click') { el.click?.(); }
+        if (ev.type === 'click') el.click?.();
         el.dispatchEvent(new MouseEvent(ev.type, {
           bubbles: true, cancelable: true,
           clientX: ev.x, clientY: ev.y,
           button: btnNum(ev.button),
-          clickCount: ev.type === 'dblclick' ? 2 : 1,
+          detail: ev.type === 'dblclick' ? 2 : 1,
         }));
         break;
       }
       case 'wheel': {
-        const el = document.elementFromPoint(ev.x, ev.y) || document.body;
+        const el = elementAtPoint(ev.x, ev.y) || document.body;
         el.dispatchEvent(new WheelEvent('wheel', {
           bubbles: true, cancelable: true,
           deltaX: ev.deltaX, deltaY: ev.deltaY,
@@ -168,6 +208,16 @@
         }
         break;
       }
+      // Fix U2: replay contenteditable
+      case 'contenteditable': {
+        const el = document.activeElement;
+        if (el && el.isContentEditable) {
+          el.innerHTML = ev.html;
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        break;
+      }
       case 'select': {
         const el = document.activeElement;
         if (el && el.tagName === 'SELECT') {
@@ -188,10 +238,8 @@
   }
 
   // Notify parent that this page is ready
-  try {
-    window.parent.postMessage({
-      __rtype: 'INJECT_READY',
-      url: window.__PROXIED_URL__ || location.href,
-    }, '*');
-  } catch {}
+  sendToParent({
+    __rtype: 'INJECT_READY',
+    url: window.__PROXIED_URL__ || location.href,
+  });
 })();

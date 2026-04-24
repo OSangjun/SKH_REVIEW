@@ -85,20 +85,19 @@ async function dispatch(page, ev) {
       await page.evaluate((x, y) => window.scrollTo(x, y), ev.scrollX, ev.scrollY);
       break;
 
+    // Fix B2: modifier keys are already recorded as individual keydown/keyup events.
+    // Just press/release the key as-is; pressing modifiers again would double-fire.
     case 'keydown':
-      if (ev.ctrl)  await page.keyboard.down('Control');
-      if (ev.shift) await page.keyboard.down('Shift');
-      if (ev.alt)   await page.keyboard.down('Alt');
-      if (ev.meta)  await page.keyboard.down('Meta');
       await page.keyboard.down(normalizeKey(ev.key));
       break;
 
     case 'keyup':
       await page.keyboard.up(normalizeKey(ev.key));
-      if (ev.key === 'Control') await page.keyboard.up('Control');
-      if (ev.key === 'Shift')   await page.keyboard.up('Shift');
-      if (ev.key === 'Alt')     await page.keyboard.up('Alt');
-      if (ev.key === 'Meta')    await page.keyboard.up('Meta');
+      break;
+
+    // Fix U1: navigate events recorded during multi-page sessions
+    case 'navigate':
+      await page.goto(ev.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       break;
 
     case 'input':
@@ -125,23 +124,7 @@ async function dispatch(page, ev) {
 }
 
 function normalizeKey(key) {
-  const MAP = {
-    ' ': 'Space',
-    'ArrowUp': 'ArrowUp',
-    'ArrowDown': 'ArrowDown',
-    'ArrowLeft': 'ArrowLeft',
-    'ArrowRight': 'ArrowRight',
-    'Enter': 'Enter',
-    'Backspace': 'Backspace',
-    'Tab': 'Tab',
-    'Escape': 'Escape',
-    'Delete': 'Delete',
-    'Home': 'Home',
-    'End': 'End',
-    'PageUp': 'PageUp',
-    'PageDown': 'PageDown',
-  };
-  return MAP[key] ?? key;
+  return key === ' ' ? 'Space' : key;
 }
 
 function sleep(ms) {

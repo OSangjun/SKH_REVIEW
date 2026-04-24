@@ -20,6 +20,17 @@
       <button id="record-btn" class="btn btn-record">
         <span class="dot"></span> 녹화
       </button>
+      <!-- Fix U6: replay speed selector -->
+      <div class="speed-wrap">
+        <label class="speed-label" for="speed-select">속도</label>
+        <select id="speed-select" class="speed-select">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </div>
       <button id="replay-btn" class="btn btn-replay" disabled>
         ▶ 재생
       </button>
