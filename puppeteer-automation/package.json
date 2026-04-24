@@ -1,0 +1,14 @@
+{
+  "name": "puppeteer-browser-automation",
+  "version": "1.0.0",
+  "description": "Records and replays user keyboard/mouse interactions via Puppeteer",
+  "main": "src/index.js",
+  "scripts": {
+    "record": "node src/index.js record",
+    "replay": "node src/index.js replay",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.42.0"
+  }
+}
