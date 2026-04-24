@@ -6,6 +6,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const puppeteer  = require('puppeteer-core');
 const path       = require('path');
 const fs         = require('fs');
+const Database   = require('better-sqlite3');
 
 const CHROME_PATH =
   process.env.CHROME_PATH ||
@@ -23,53 +24,91 @@ const wss        = new WebSocketServer({ server: httpServer });
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Storage (metadata in memory, events per-file) ───────────────────────────
+// ─── SQLite storage ───────────────────────────────────────────────────────────
 
-const RECORDINGS_DIR = path.join(__dirname, 'recordings');
-const META_FILE      = path.join(RECORDINGS_DIR, 'meta.json');
+const DB_PATH = path.join(__dirname, 'recordings.db');
+const db      = new Database(DB_PATH);
 
-let recordingsMeta = [];
-let nextId         = 1;
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
-function eventsFile(id) { return path.join(RECORDINGS_DIR, `${id}.events.json`); }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS recordings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL,
+    url         TEXT    NOT NULL,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL,
+    events      TEXT    NOT NULL DEFAULT '[]'
+  )
+`);
 
-function loadMeta() {
+const stmts = {
+  insertRecording: db.prepare(
+    `INSERT INTO recordings (name, url, event_count, created_at, events)
+     VALUES (@name, @url, @event_count, @created_at, @events)`
+  ),
+  allMeta: db.prepare(
+    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
+     FROM recordings ORDER BY id`
+  ),
+  getMeta: db.prepare(
+    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
+     FROM recordings WHERE id = ?`
+  ),
+  getEvents: db.prepare(`SELECT events FROM recordings WHERE id = ?`),
+  deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
+};
+
+// Migrate from old file-based storage (one-time, then ignored)
+(function migrate() {
+  const META_FILE = path.join(__dirname, 'recordings', 'meta.json');
+  if (!fs.existsSync(META_FILE)) return;
   try {
-    if (!fs.existsSync(META_FILE)) return;
-    const data = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
-    if (!Array.isArray(data)) throw new Error('meta.json is not an array');
-    recordingsMeta = data;
-    if (recordingsMeta.length > 0)
-      nextId = Math.max(...recordingsMeta.map(r => r.id)) + 1;
+    const oldMeta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+    if (!Array.isArray(oldMeta) || oldMeta.length === 0) return;
+    const existing = new Set(stmts.allMeta.all().map(r => r.id));
+    let migrated = 0;
+    const insert = db.transaction(() => {
+      for (const rec of oldMeta) {
+        if (existing.has(rec.id)) continue;
+        const evFile = path.join(__dirname, 'recordings', `${rec.id}.events.json`);
+        const events = fs.existsSync(evFile)
+          ? fs.readFileSync(evFile, 'utf8')
+          : '[]';
+        db.prepare(
+          `INSERT INTO recordings (id, name, url, event_count, created_at, events)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(rec.id, rec.name, rec.url, rec.eventCount ?? 0, rec.createdAt ?? new Date().toISOString(), events);
+        migrated++;
+      }
+    });
+    insert();
+    if (migrated > 0)
+      console.log(`[Storage] Migrated ${migrated} recording(s) from file storage to SQLite.`);
   } catch (err) {
-    console.error('[Storage] Failed to load meta.json:', err.message, '— starting fresh.');
-    recordingsMeta = [];
+    console.error('[Storage] Migration error (non-fatal):', err.message);
   }
+})();
+
+function dbAllMeta()        { return stmts.allMeta.all(); }
+function dbGetMeta(id)      { return stmts.getMeta.get(id) ?? null; }
+function dbLoadEvents(id)   {
+  const row = stmts.getEvents.get(id);
+  if (!row) return null;
+  try { return JSON.parse(row.events); }
+  catch { return null; }
 }
-
-function saveMeta() {
-  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-  fs.writeFileSync(META_FILE, JSON.stringify(recordingsMeta, null, 2));
+function dbSaveRecording(name, url, eventCount, createdAt, events) {
+  const info = stmts.insertRecording.run({
+    name, url,
+    event_count: eventCount,
+    created_at:  createdAt,
+    events:      JSON.stringify(events),
+  });
+  return info.lastInsertRowid;
 }
-
-function saveEvents(id, events) {
-  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-  fs.writeFileSync(eventsFile(id), JSON.stringify(events));
-}
-
-function loadEvents(id) {
-  try {
-    const f = eventsFile(id);
-    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
-  } catch (err) {
-    console.error(`[Storage] Failed to load events #${id}:`, err.message);
-    return null;
-  }
-}
-
-function deleteEvents(id) { try { fs.unlinkSync(eventsFile(id)); } catch {} }
-
-loadMeta();
+function dbDeleteRecording(id) { stmts.deleteRecording.run(id); }
 
 // ─── Puppeteer session state ──────────────────────────────────────────────────
 
@@ -244,7 +283,7 @@ wss.on('connection', async ws => {
     if (!browser) await launchSession();
     ws.send(JSON.stringify({ type: 'ready', viewport: VIEWPORT }));
     ws.send(JSON.stringify({ type: 'url-changed', url: currentUrl }));
-    ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
+    ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
   } catch (err) {
     ws.send(JSON.stringify({ type: 'error', message: err.message }));
     console.error('[WS] Session launch error:', err.message);
@@ -330,27 +369,29 @@ async function handleClientMessage(msg, ws) {
         ws.send(JSON.stringify({ type: 'recording-empty' }));
         break;
       }
-      const id   = nextId++;
-      const meta = {
-        id,
-        name:       `녹화 #${id}`,
-        url:        currentUrl,
-        eventCount: capturedEvents.length,
-        createdAt:  new Date().toISOString(),
-      };
-      recordingsMeta.push(meta);
-      saveEvents(id, [...capturedEvents]);
-      saveMeta();
+      const createdAt = new Date().toISOString();
+      const newId     = dbSaveRecording(
+        `녹화 #?`,          // placeholder; updated after we know the real id
+        currentUrl,
+        capturedEvents.length,
+        createdAt,
+        [...capturedEvents],
+      );
+      // Update name to reflect actual auto-increment id
+      db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`)
+        .run(`녹화 #${newId}`, newId);
+      const meta = dbGetMeta(newId);
       ws.send(JSON.stringify({ type: 'recording-saved', recording: meta }));
-      ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
+      ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
+      console.log(`[Recording] Saved as id=${newId}`);
       break;
     }
 
     // ── Replay ────────────────────────────────────────────────────────────────
     case 'replay': {
-      const meta = recordingsMeta.find(r => r.id === msg.id);
+      const meta = dbGetMeta(msg.id);
       if (!meta) break;
-      const events = loadEvents(msg.id);
+      const events = dbLoadEvents(msg.id);
       if (!events) break;
       await runReplay(events, meta.url, msg.speedFactor ?? 1.0, ws);
       break;
@@ -358,13 +399,8 @@ async function handleClientMessage(msg, ws) {
 
     // ── Delete ────────────────────────────────────────────────────────────────
     case 'delete-recording': {
-      const idx = recordingsMeta.findIndex(r => r.id === msg.id);
-      if (idx !== -1) {
-        deleteEvents(recordingsMeta[idx].id);
-        recordingsMeta.splice(idx, 1);
-        saveMeta();
-        ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
-      }
+      dbDeleteRecording(msg.id);
+      ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
       break;
     }
   }
@@ -454,32 +490,30 @@ async function dispatchReplayEvent(ev) {
 
 // ─── REST API — recordings ────────────────────────────────────────────────────
 
-app.get('/api/recordings', (_req, res) => res.json(recordingsMeta));
+app.get('/api/recordings', (_req, res) => res.json(dbAllMeta()));
 
 app.get('/api/recordings/:id', (req, res) => {
-  const meta = recordingsMeta.find(r => r.id === +req.params.id);
+  const meta = dbGetMeta(+req.params.id);
   if (!meta) return res.status(404).json({ error: 'Not found' });
-  const events = loadEvents(meta.id);
-  if (!events) return res.status(500).json({ error: 'Events file missing' });
+  const events = dbLoadEvents(meta.id);
+  if (!events) return res.status(500).json({ error: 'Events not found' });
   res.json({ ...meta, events });
 });
 
 app.delete('/api/recordings/:id', (req, res) => {
-  const idx = recordingsMeta.findIndex(r => r.id === +req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  deleteEvents(recordingsMeta[idx].id);
-  recordingsMeta.splice(idx, 1);
-  saveMeta();
+  const meta = dbGetMeta(+req.params.id);
+  if (!meta) return res.status(404).json({ error: 'Not found' });
+  dbDeleteRecording(meta.id);
   res.json({ ok: true });
 });
 
 // ─── REST API — Puppeteer script export ───────────────────────────────────────
 
 app.get('/api/recordings/:id/export/puppeteer', (req, res) => {
-  const meta = recordingsMeta.find(r => r.id === +req.params.id);
+  const meta = dbGetMeta(+req.params.id);
   if (!meta) return res.status(404).json({ error: 'Not found' });
-  const events = loadEvents(meta.id);
-  if (!events) return res.status(500).json({ error: 'Events file missing' });
+  const events = dbLoadEvents(meta.id);
+  if (!events) return res.status(500).json({ error: 'Events not found' });
 
   const filename = `${meta.name.replace(/[^\w\s-]/g, '_')}.js`;
   res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
