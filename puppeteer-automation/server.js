@@ -1,73 +1,48 @@
 'use strict';
 
-const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const { load: cheerioLoad } = require('cheerio');
-const puppeteer = require('puppeteer-core');
+const express    = require('express');
+const http       = require('http');
+const { WebSocketServer, WebSocket } = require('ws');
+const puppeteer  = require('puppeteer-core');
+const path       = require('path');
+const fs         = require('fs');
 
 const CHROME_PATH =
   process.env.CHROME_PATH ||
   '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
-const PORT = process.env.PORT || 3000;
-const RECORDINGS_DIR = path.join(__dirname, 'recordings');
-const META_FILE = path.join(RECORDINGS_DIR, 'meta.json');
-const OLD_FILE = path.join(RECORDINGS_DIR, 'web-recordings.json'); // legacy
+const PORT     = process.env.PORT || 3000;
+const VIEWPORT = { width: 1280, height: 720 };
 
-const app = express();
+// ─── HTTP + WebSocket server setup ───────────────────────────────────────────
+
+const app        = express();
+const httpServer = http.createServer(app);
+const wss        = new WebSocketServer({ server: httpServer });
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Storage (metadata in memory, events in per-ID files) ─────────────────────
-// Fixes D3/D4/D6/P3: lazy event loading, O(1) saves, parse-error logging
+// ─── Storage (metadata in memory, events per-file) ───────────────────────────
 
-let recordingsMeta = []; // [{id, name, url, eventCount, createdAt}]
-let nextId = 1;
+const RECORDINGS_DIR = path.join(__dirname, 'recordings');
+const META_FILE      = path.join(RECORDINGS_DIR, 'meta.json');
 
-function eventsFile(id) {
-  return path.join(RECORDINGS_DIR, `${id}.events.json`);
-}
+let recordingsMeta = [];
+let nextId         = 1;
+
+function eventsFile(id) { return path.join(RECORDINGS_DIR, `${id}.events.json`); }
 
 function loadMeta() {
   try {
-    if (!fs.existsSync(META_FILE)) return false;
+    if (!fs.existsSync(META_FILE)) return;
     const data = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
-    if (!Array.isArray(data)) throw new Error('meta.json root is not an array');
+    if (!Array.isArray(data)) throw new Error('meta.json is not an array');
     recordingsMeta = data;
     if (recordingsMeta.length > 0)
       nextId = Math.max(...recordingsMeta.map(r => r.id)) + 1;
-    return true;
   } catch (err) {
     console.error('[Storage] Failed to load meta.json:', err.message, '— starting fresh.');
-    recordingsMeta = [];
-    return false;
-  }
-}
-
-function migrateOldFormat() {
-  if (!fs.existsSync(OLD_FILE)) return;
-  try {
-    console.log('[Storage] Migrating web-recordings.json …');
-    const old = JSON.parse(fs.readFileSync(OLD_FILE, 'utf8'));
-    for (const rec of old) {
-      fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-      fs.writeFileSync(eventsFile(rec.id), JSON.stringify(rec.events ?? []));
-      recordingsMeta.push({
-        id: rec.id,
-        name: rec.name,
-        url: rec.url,
-        eventCount: Array.isArray(rec.events) ? rec.events.length : 0,
-        createdAt: rec.createdAt,
-      });
-    }
-    if (recordingsMeta.length > 0)
-      nextId = Math.max(...recordingsMeta.map(r => r.id)) + 1;
-    saveMeta();
-    fs.renameSync(OLD_FILE, OLD_FILE + '.bak');
-    console.log(`[Storage] Migrated ${recordingsMeta.length} recordings.`);
-  } catch (err) {
-    console.error('[Storage] Migration failed:', err.message);
     recordingsMeta = [];
   }
 }
@@ -85,189 +60,401 @@ function saveEvents(id, events) {
 function loadEvents(id) {
   try {
     const f = eventsFile(id);
-    if (!fs.existsSync(f)) return null;
-    return JSON.parse(fs.readFileSync(f, 'utf8'));
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
   } catch (err) {
     console.error(`[Storage] Failed to load events #${id}:`, err.message);
     return null;
   }
 }
 
-function deleteEvents(id) {
-  try { fs.unlinkSync(eventsFile(id)); } catch {}
+function deleteEvents(id) { try { fs.unlinkSync(eventsFile(id)); } catch {} }
+
+loadMeta();
+
+// ─── Puppeteer session state ──────────────────────────────────────────────────
+
+let browser       = null;   // Puppeteer Browser
+let activePage    = null;   // current page
+let cdpSession    = null;   // CDP session for screencasting
+let activeWs      = null;   // connected frontend WebSocket
+
+let isRecording        = false;
+let capturedEvents     = [];
+let recordingStartTime = null;
+let currentUrl         = 'about:blank';
+let firstNavigateDone  = false; // suppress navigate event on very first load
+
+// ─── Capture script (injected via evaluateOnNewDocument) ─────────────────────
+// This runs in EVERY page context regardless of how navigation happened
+// (JS redirect, link click, form submit, etc.). Replaces the proxy injection approach.
+
+function buildCaptureScript() {
+  return `(function () {
+    if (window.__CDP_CAPTURE_ACTIVE__) return;
+    window.__CDP_CAPTURE_ACTIVE__ = true;
+
+    const cap = window.__captureEvent;
+    if (!cap) return;
+
+    const MOVE_THROTTLE   = 50;
+    const SCROLL_THROTTLE = 100;
+    let lastMove = 0, lastScroll = 0;
+
+    function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
+
+    document.addEventListener('click',
+      e => cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
+    document.addEventListener('dblclick',
+      e => cap('dblclick', { x: e.clientX, y: e.clientY }), true);
+    document.addEventListener('mousedown',
+      e => cap('mousedown', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
+    document.addEventListener('mouseup',
+      e => cap('mouseup',   { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
+
+    document.addEventListener('mousemove', e => {
+      const now = Date.now();
+      if (now - lastMove < MOVE_THROTTLE) return;
+      lastMove = now;
+      cap('mousemove', { x: e.clientX, y: e.clientY });
+    }, true);
+
+    document.addEventListener('wheel',
+      e => cap('wheel', { x: e.clientX, y: e.clientY, deltaX: e.deltaX, deltaY: e.deltaY }),
+      { capture: true, passive: true });
+
+    window.addEventListener('scroll', () => {
+      const now = Date.now();
+      if (now - lastScroll < SCROLL_THROTTLE) return;
+      lastScroll = now;
+      cap('scroll', { scrollX: window.scrollX, scrollY: window.scrollY });
+    }, true);
+
+    document.addEventListener('keydown',
+      e => cap('keydown', {
+        key: e.key, code: e.code,
+        ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey,
+      }), true);
+    document.addEventListener('keyup',
+      e => cap('keyup', { key: e.key, code: e.code }), true);
+
+    document.addEventListener('input', e => {
+      const el = e.target;
+      if (!el) return;
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        cap('input', { value: el.value });
+      } else if (el.isContentEditable) {
+        cap('contenteditable', { html: el.innerHTML, text: el.innerText });
+      }
+    }, true);
+
+    document.addEventListener('change', e => {
+      if (e.target && e.target.tagName === 'SELECT')
+        cap('select', { value: e.target.value });
+    }, true);
+  })();`;
 }
 
-if (!loadMeta()) migrateOldFormat();
+// ─── Browser session lifecycle ────────────────────────────────────────────────
 
-// ─── Security: HTML escaping helper (Fix B1 XSS) ──────────────────────────────
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-// ─── Proxy helpers ────────────────────────────────────────────────────────────
-
-function resolveUrl(base, rel) {
-  try {
-    if (!rel) return null;
-    if (rel.startsWith('//')) return new URL('https:' + rel).href;
-    return new URL(rel, base).href;
-  } catch {
-    return null;
-  }
-}
-
-function toProxyHref(absUrl) {
-  return `/proxy?url=${encodeURIComponent(absUrl)}`;
-}
-
-function isRewritable(val) {
-  if (!val) return false;
-  const v = val.trim();
-  return (
-    !v.startsWith('data:') &&
-    !v.startsWith('#') &&
-    !v.startsWith('javascript:') &&
-    !v.startsWith('mailto:') &&
-    !v.startsWith('tel:')
-  );
-}
-
-function rewriteHtml(html, pageUrl) {
-  const $ = cheerioLoad(html, { decodeEntities: false });
-
-  $('meta[http-equiv]').each((_, el) => {
-    if (/content-security-policy/i.test($(el).attr('http-equiv') || ''))
-      $(el).remove();
+async function launchSession() {
+  console.log('[Browser] Launching Puppeteer …');
+  browser = await puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-web-security',          // allow cross-origin iframes if any
+      '--disable-features=IsolateOrigins,site-per-process',
+    ],
+    defaultViewport: VIEWPORT,
   });
 
-  $('[href]').each((_, el) => {
-    const v = $(el).attr('href');
-    if (!isRewritable(v)) return;
-    const abs = resolveUrl(pageUrl, v);
-    if (abs) $(el).attr('href', toProxyHref(abs));
+  [activePage] = await browser.pages();
+
+  // Expose capture bridge: page JS → Node.js handler
+  await activePage.exposeFunction('__captureEvent', (type, data) => {
+    if (!isRecording) return;
+    const now = Date.now();
+    if (recordingStartTime === null) recordingStartTime = now;
+    const ev = { type, ...data, t: now - recordingStartTime };
+    capturedEvents.push(ev);
+    send({ type: 'recording-event', count: capturedEvents.length });
   });
 
-  $('[src]').each((_, el) => {
-    const v = $(el).attr('src');
-    if (!isRewritable(v)) return;
-    const abs = resolveUrl(pageUrl, v);
-    if (abs) $(el).attr('src', toProxyHref(abs));
-  });
+  // Inject capture script on EVERY navigation (JS redirect, meta refresh, link, etc.)
+  await activePage.evaluateOnNewDocument(buildCaptureScript());
 
-  $('[srcset]').each((_, el) => {
-    const srcset = $(el).attr('srcset') || '';
-    const rewritten = srcset.replace(/([^\s,]+)(\s+[\d.]+[wx])?/g, (m, url, desc) => {
-      if (!isRewritable(url)) return m;
-      const abs = resolveUrl(pageUrl, url);
-      return abs ? toProxyHref(abs) + (desc || '') : m;
-    });
-    $(el).attr('srcset', rewritten);
-  });
+  // Track URL changes
+  activePage.on('framenavigated', frame => {
+    if (frame !== activePage.mainFrame()) return;
+    const url = frame.url();
+    if (url === currentUrl || url === 'about:blank') return;
 
-  $('form[action]').each((_, el) => {
-    const v = $(el).attr('action');
-    if (!isRewritable(v)) return;
-    const abs = resolveUrl(pageUrl, v);
-    if (abs) $(el).attr('action', toProxyHref(abs));
-  });
-
-  $('body').append(`
-<script>window.__PROXIED_URL__ = ${JSON.stringify(pageUrl)};</script>
-<script src="/inject.js"></script>`);
-
-  return $.html();
-}
-
-function rewriteCss(css, pageUrl) {
-  return css.replace(/url\(\s*['"]?([^'"\)\s]+)['"]?\s*\)/g, (match, u) => {
-    if (!isRewritable(u)) return match;
-    const abs = resolveUrl(pageUrl, u);
-    return abs ? `url("${toProxyHref(abs)}")` : match;
-  });
-}
-
-// ─── Proxy endpoint ───────────────────────────────────────────────────────────
-
-app.get('/proxy', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing url parameter');
-
-  try {
-    const fetchRes = await fetch(targetUrl, {
-      redirect: 'follow',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
-      },
-    });
-
-    const finalUrl = fetchRes.url || targetUrl;
-    const ct = fetchRes.headers.get('content-type') || 'application/octet-stream';
-
-    res.setHeader('Content-Type', ct);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.removeHeader('X-Frame-Options');
-    res.removeHeader('Content-Security-Policy');
-
-    // Fix P1: cache static assets for 5 min
-    if (!ct.includes('text/html')) {
-      res.setHeader('Cache-Control', 'public, max-age=300');
+    if (isRecording && firstNavigateDone) {
+      const ev = { type: 'navigate', url, t: Date.now() - recordingStartTime };
+      capturedEvents.push(ev);
+      send({ type: 'recording-event', count: capturedEvents.length });
     }
+    firstNavigateDone = true;
+    currentUrl = url;
+    send({ type: 'url-changed', url });
+  });
 
-    if (ct.includes('text/html')) {
-      const html = await fetchRes.text();
-      res.send(rewriteHtml(html, finalUrl));
-    } else if (ct.includes('text/css')) {
-      const css = await fetchRes.text();
-      res.send(rewriteCss(css, finalUrl));
-    } else if (ct.includes('javascript') || ct.includes('text/')) {
-      res.send(await fetchRes.text());
-    } else {
-      res.send(Buffer.from(await fetchRes.arrayBuffer()));
+  // Handle page crashes / unexpected closes
+  browser.on('disconnected', () => {
+    console.log('[Browser] Disconnected');
+    browser = null; activePage = null; cdpSession = null;
+  });
+
+  // Start CDP screencasting
+  await startScreencast();
+
+  console.log('[Browser] Ready');
+}
+
+async function startScreencast() {
+  cdpSession = await activePage.createCDPSession();
+  await cdpSession.send('Page.startScreencast', {
+    format:        'jpeg',
+    quality:       75,
+    maxWidth:      VIEWPORT.width,
+    maxHeight:     VIEWPORT.height,
+    everyNthFrame: 1,
+  });
+
+  cdpSession.on('Page.screencastFrame', async ({ data, sessionId }) => {
+    // Forward JPEG frame to the connected frontend
+    if (activeWs?.readyState === WebSocket.OPEN) {
+      activeWs.send(JSON.stringify({ type: 'frame', data }));
     }
+    // Must ack to receive next frame
+    await cdpSession.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+  });
+}
+
+// ─── WebSocket connection handler ─────────────────────────────────────────────
+
+wss.on('connection', async ws => {
+  console.log('[WS] Client connected');
+  activeWs = ws;
+
+  try {
+    if (!browser) await launchSession();
+    ws.send(JSON.stringify({ type: 'ready', viewport: VIEWPORT }));
+    ws.send(JSON.stringify({ type: 'url-changed', url: currentUrl }));
+    ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
   } catch (err) {
-    // Fix B1: XSS — escape error message and URL before embedding in HTML
-    res.status(502).send(`
-      <html data-proxy-error="true">
-      <body style="font-family:sans-serif;padding:32px;color:#c00">
-        <h2>프록시 오류</h2>
-        <pre>${escHtml(err.message)}</pre>
-        <p>URL: ${escHtml(targetUrl)}</p>
-      </body></html>`);
+    ws.send(JSON.stringify({ type: 'error', message: err.message }));
+    console.error('[WS] Session launch error:', err.message);
   }
+
+  ws.on('message', async raw => {
+    try { await handleClientMessage(JSON.parse(raw.toString()), ws); }
+    catch (err) { console.error('[WS] Handler error:', err.message); }
+  });
+
+  ws.on('close', () => {
+    if (activeWs === ws) activeWs = null;
+    console.log('[WS] Client disconnected');
+  });
 });
 
-// ─── Recordings API ───────────────────────────────────────────────────────────
+function send(msg) {
+  if (activeWs?.readyState === WebSocket.OPEN)
+    activeWs.send(JSON.stringify(msg));
+}
 
-app.get('/api/recordings', (_req, res) => {
-  res.json(recordingsMeta); // metadata only, no events (Fix P3)
-});
+// ─── Client message dispatcher ────────────────────────────────────────────────
 
-app.post('/api/recordings', (req, res) => {
-  const { name, url, events } = req.body;
-  if (!url || !Array.isArray(events))
-    return res.status(400).json({ error: 'url and events required' });
+async function handleClientMessage(msg, ws) {
+  if (!activePage) {
+    ws.send(JSON.stringify({ type: 'error', message: '브라우저 세션이 없습니다.' }));
+    return;
+  }
 
-  const id = nextId++;
-  const meta = {
-    id,
-    name: name || `녹화 #${id}`,
-    url,
-    eventCount: events.length,
-    createdAt: new Date().toISOString(),
-  };
-  recordingsMeta.push(meta);
-  saveEvents(id, events); // Fix D3/D4: events saved to separate file
-  saveMeta();
-  res.json(meta);
-});
+  switch (msg.type) {
+
+    // ── Navigation ───────────────────────────────────────────────────────────
+    case 'navigate': {
+      firstNavigateDone = false;
+      await activePage.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      break;
+    }
+
+    // ── Mouse events ─────────────────────────────────────────────────────────
+    case 'mousemove':
+      await activePage.mouse.move(msg.x, msg.y);
+      break;
+    case 'mousedown':
+      await activePage.mouse.move(msg.x, msg.y);
+      await activePage.mouse.down({ button: msg.button ?? 'left' });
+      break;
+    case 'mouseup':
+      await activePage.mouse.move(msg.x, msg.y);
+      await activePage.mouse.up({ button: msg.button ?? 'left' });
+      break;
+    case 'click':
+      await activePage.mouse.click(msg.x, msg.y, { button: msg.button ?? 'left' });
+      break;
+    case 'dblclick':
+      await activePage.mouse.click(msg.x, msg.y, { clickCount: 2 });
+      break;
+    case 'wheel':
+      await activePage.mouse.wheel({ deltaX: msg.deltaX ?? 0, deltaY: msg.deltaY ?? 0 });
+      break;
+
+    // ── Keyboard events ───────────────────────────────────────────────────────
+    case 'keydown':
+      await activePage.keyboard.down(msg.key === ' ' ? 'Space' : msg.key);
+      break;
+    case 'keyup':
+      await activePage.keyboard.up(msg.key === ' ' ? 'Space' : msg.key);
+      break;
+
+    // ── Recording ─────────────────────────────────────────────────────────────
+    case 'start-recording':
+      isRecording        = true;
+      capturedEvents     = [];
+      recordingStartTime = null;
+      firstNavigateDone  = true;
+      ws.send(JSON.stringify({ type: 'recording-started' }));
+      console.log('[Recording] Started');
+      break;
+
+    case 'stop-recording': {
+      isRecording = false;
+      console.log(`[Recording] Stopped — ${capturedEvents.length} events`);
+      if (capturedEvents.length === 0) {
+        ws.send(JSON.stringify({ type: 'recording-empty' }));
+        break;
+      }
+      const id   = nextId++;
+      const meta = {
+        id,
+        name:       `녹화 #${id}`,
+        url:        currentUrl,
+        eventCount: capturedEvents.length,
+        createdAt:  new Date().toISOString(),
+      };
+      recordingsMeta.push(meta);
+      saveEvents(id, [...capturedEvents]);
+      saveMeta();
+      ws.send(JSON.stringify({ type: 'recording-saved', recording: meta }));
+      ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
+      break;
+    }
+
+    // ── Replay ────────────────────────────────────────────────────────────────
+    case 'replay': {
+      const meta = recordingsMeta.find(r => r.id === msg.id);
+      if (!meta) break;
+      const events = loadEvents(msg.id);
+      if (!events) break;
+      await runReplay(events, meta.url, msg.speedFactor ?? 1.0, ws);
+      break;
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────────
+    case 'delete-recording': {
+      const idx = recordingsMeta.findIndex(r => r.id === msg.id);
+      if (idx !== -1) {
+        deleteEvents(recordingsMeta[idx].id);
+        recordingsMeta.splice(idx, 1);
+        saveMeta();
+        ws.send(JSON.stringify({ type: 'recordings', list: recordingsMeta }));
+      }
+      break;
+    }
+  }
+}
+
+// ─── Replay engine ────────────────────────────────────────────────────────────
+
+async function runReplay(events, startUrl, speedFactor, ws) {
+  ws.send(JSON.stringify({ type: 'replay-started' }));
+
+  // Navigate to the recording's starting URL
+  firstNavigateDone = false;
+  await activePage.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await sleep(300);
+
+  const total = events.length;
+  let lastT   = 0;
+
+  for (let i = 0; i < total; i++) {
+    const ev    = events[i];
+    const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
+    if (delay > 0) await sleep(delay);
+    lastT = ev.t ?? 0;
+
+    await dispatchReplayEvent(ev);
+
+    if (i % 5 === 0 || i === total - 1)
+      ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
+  }
+
+  ws.send(JSON.stringify({ type: 'replay-done' }));
+  console.log('[Replay] Done');
+}
+
+const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
+
+async function dispatchReplayEvent(ev) {
+  try {
+    switch (ev.type) {
+      case 'navigate':
+        await activePage.goto(ev.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        break;
+      case 'click':
+        await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
+        break;
+      case 'dblclick':
+        await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
+        break;
+      case 'mousedown':
+        await activePage.mouse.move(ev.x, ev.y);
+        await activePage.mouse.down({ button: BTN(ev.button) });
+        break;
+      case 'mouseup':
+        await activePage.mouse.move(ev.x, ev.y);
+        await activePage.mouse.up({ button: BTN(ev.button) });
+        break;
+      case 'mousemove':
+        await activePage.mouse.move(ev.x, ev.y);
+        break;
+      case 'wheel':
+        await activePage.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
+        break;
+      case 'scroll':
+        await activePage.evaluate((x, y) => window.scrollTo(x, y), ev.scrollX, ev.scrollY);
+        break;
+      case 'keydown':
+        await activePage.keyboard.down(ev.key === ' ' ? 'Space' : ev.key);
+        break;
+      case 'keyup':
+        await activePage.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
+        break;
+      case 'input':
+        await activePage.keyboard.down('Control');
+        await activePage.keyboard.press('a');
+        await activePage.keyboard.up('Control');
+        await activePage.keyboard.type(ev.value ?? '');
+        break;
+      case 'contenteditable':
+        await activePage.evaluate(
+          h => { if (document.activeElement) document.activeElement.innerHTML = h; },
+          ev.html
+        );
+        break;
+    }
+  } catch {}
+}
+
+// ─── REST API — recordings ────────────────────────────────────────────────────
+
+app.get('/api/recordings', (_req, res) => res.json(recordingsMeta));
 
 app.get('/api/recordings/:id', (req, res) => {
   const meta = recordingsMeta.find(r => r.id === +req.params.id);
@@ -280,14 +467,13 @@ app.get('/api/recordings/:id', (req, res) => {
 app.delete('/api/recordings/:id', (req, res) => {
   const idx = recordingsMeta.findIndex(r => r.id === +req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const { id } = recordingsMeta[idx];
+  deleteEvents(recordingsMeta[idx].id);
   recordingsMeta.splice(idx, 1);
-  deleteEvents(id);
   saveMeta();
   res.json({ ok: true });
 });
 
-// ─── Puppeteer script export (Fix U5) ─────────────────────────────────────────
+// ─── REST API — Puppeteer script export ───────────────────────────────────────
 
 app.get('/api/recordings/:id/export/puppeteer', (req, res) => {
   const meta = recordingsMeta.find(r => r.id === +req.params.id);
@@ -298,185 +484,53 @@ app.get('/api/recordings/:id/export/puppeteer', (req, res) => {
   const filename = `${meta.name.replace(/[^\w\s-]/g, '_')}.js`;
   res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(generatePuppeteerScript({ ...meta, events }));
+  res.send(generateScript({ ...meta, events }));
 });
 
-function generatePuppeteerScript(rec) {
+function generateScript(rec) {
+  const BTN = b => b === 'right' ? "'right'" : b === 'middle' ? "'middle'" : "'left'";
   const lines = [
     `'use strict';`,
     `// Generated by Browser Automation Tool`,
-    `// Recording : ${rec.name}`,
-    `// URL       : ${rec.url}`,
-    `// Events    : ${rec.events.length}`,
-    `// Date      : ${rec.createdAt}`,
+    `// Recording : ${rec.name}  |  URL: ${rec.url}  |  Events: ${rec.events.length}`,
     ``,
     `const puppeteer = require('puppeteer');`,
-    ``,
     `(async () => {`,
     `  const browser = await puppeteer.launch({ headless: false, defaultViewport: null });`,
     `  const [page] = await browser.pages();`,
     `  await page.goto(${JSON.stringify(rec.url)}, { waitUntil: 'domcontentloaded' });`,
     ``,
   ];
-
-  const BTN = b => b === 'right' ? "'right'" : b === 'middle' ? "'middle'" : "'left'";
   let prevT = 0;
-
   for (const ev of rec.events) {
-    const d = Math.max(0, (ev.t ?? 0) - prevT);
-    prevT = ev.t ?? 0;
+    const d = Math.max(0, (ev.t ?? 0) - prevT); prevT = ev.t ?? 0;
     if (d > 0) lines.push(`  await new Promise(r => setTimeout(r, ${d}));`);
-
     switch (ev.type) {
-      case 'navigate':
-        lines.push(`  await page.goto(${JSON.stringify(ev.url)}, { waitUntil: 'domcontentloaded' });`);
-        break;
-      case 'click':
-        lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { button: ${BTN(ev.button)} });`);
-        break;
-      case 'dblclick':
-        lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { clickCount: 2 });`);
-        break;
-      case 'mousedown':
-        lines.push(`  await page.mouse.move(${ev.x}, ${ev.y}); await page.mouse.down({ button: ${BTN(ev.button)} });`);
-        break;
-      case 'mouseup':
-        lines.push(`  await page.mouse.move(${ev.x}, ${ev.y}); await page.mouse.up({ button: ${BTN(ev.button)} });`);
-        break;
-      case 'mousemove':
-        lines.push(`  await page.mouse.move(${ev.x}, ${ev.y});`);
-        break;
-      case 'wheel':
-        lines.push(`  await page.mouse.wheel({ deltaX: ${ev.deltaX}, deltaY: ${ev.deltaY} });`);
-        break;
-      case 'scroll':
-        lines.push(`  await page.evaluate(() => window.scrollTo(${ev.scrollX}, ${ev.scrollY}));`);
-        break;
-      case 'keydown':
-        lines.push(`  await page.keyboard.down(${JSON.stringify(ev.key)});`);
-        break;
-      case 'keyup':
-        lines.push(`  await page.keyboard.up(${JSON.stringify(ev.key)});`);
-        break;
+      case 'navigate':    lines.push(`  await page.goto(${JSON.stringify(ev.url)}, { waitUntil: 'domcontentloaded' });`); break;
+      case 'click':       lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { button: ${BTN(ev.button)} });`); break;
+      case 'dblclick':    lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { clickCount: 2 });`); break;
+      case 'mousemove':   lines.push(`  await page.mouse.move(${ev.x}, ${ev.y});`); break;
+      case 'wheel':       lines.push(`  await page.mouse.wheel({ deltaX: ${ev.deltaX}, deltaY: ${ev.deltaY} });`); break;
+      case 'scroll':      lines.push(`  await page.evaluate(() => window.scrollTo(${ev.scrollX}, ${ev.scrollY}));`); break;
+      case 'keydown':     lines.push(`  await page.keyboard.down(${JSON.stringify(ev.key)});`); break;
+      case 'keyup':       lines.push(`  await page.keyboard.up(${JSON.stringify(ev.key)});`); break;
       case 'input':
         lines.push(`  await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');`);
         lines.push(`  await page.keyboard.type(${JSON.stringify(ev.value ?? '')});`);
         break;
-      case 'contenteditable':
-        lines.push(`  await page.evaluate(h => { if (document.activeElement) document.activeElement.innerHTML = h; }, ${JSON.stringify(ev.html)});`);
-        break;
     }
   }
-
-  lines.push(``);
-  lines.push(`  console.log('Replay complete.');`);
   lines.push(`  await browser.close();`);
   lines.push(`})().catch(err => { console.error(err); process.exit(1); });`);
   return lines.join('\n');
 }
 
-// ─── Puppeteer replay endpoint ────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-app.post('/api/replay/:id', async (req, res) => {
-  const meta = recordingsMeta.find(r => r.id === +req.params.id);
-  if (!meta) return res.status(404).json({ error: 'Not found' });
-  const events = loadEvents(meta.id);
-  if (!events) return res.status(500).json({ error: 'Events file missing' });
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  const speedFactor = Math.max(0.1, +req.body.speedFactor || 1.0);
-  res.json({ ok: true, message: 'Puppeteer 재생이 시작됩니다.' });
+// ─── Start ────────────────────────────────────────────────────────────────────
 
-  (async () => {
-    let browser;
-    try {
-      browser = await puppeteer.launch({
-        executablePath: CHROME_PATH,
-        headless: false,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized'],
-        defaultViewport: null,
-      });
-      const [page] = await browser.pages();
-      await page.goto(meta.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-      let lastT = 0;
-      for (const ev of events) {
-        const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
-        if (delay > 0) await sleep(delay);
-        lastT = ev.t ?? 0;
-        await dispatchPuppeteerEvent(page, ev);
-      }
-      console.log(`[Puppeteer] Replay of recording #${meta.id} complete.`);
-    } catch (err) {
-      console.error('[Puppeteer Replay]', err.message);
-    } finally {
-      // Fix B3: browser always closes, even on error
-      if (browser) {
-        await sleep(3000);
-        browser.close().catch(() => {});
-      }
-    }
-  })();
-});
-
-const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
-
-async function dispatchPuppeteerEvent(page, ev) {
-  try {
-    switch (ev.type) {
-      // Fix B2: handle navigate events during replay
-      case 'navigate':
-        await page.goto(ev.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        break;
-      case 'click':
-        await page.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
-        break;
-      case 'dblclick':
-        await page.mouse.click(ev.x, ev.y, { clickCount: 2 });
-        break;
-      case 'mousedown':
-        await page.mouse.move(ev.x, ev.y);
-        await page.mouse.down({ button: BTN(ev.button) });
-        break;
-      case 'mouseup':
-        await page.mouse.move(ev.x, ev.y);
-        await page.mouse.up({ button: BTN(ev.button) });
-        break;
-      case 'mousemove':
-        await page.mouse.move(ev.x, ev.y);
-        break;
-      case 'wheel':
-        await page.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
-        break;
-      case 'scroll':
-        await page.evaluate((x, y) => window.scrollTo(x, y), ev.scrollX, ev.scrollY);
-        break;
-      // Fix B2: just press/release the key as-is; modifiers are separate recorded events
-      case 'keydown':
-        await page.keyboard.down(ev.key === ' ' ? 'Space' : ev.key);
-        break;
-      case 'keyup':
-        await page.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
-        break;
-      case 'input':
-        await page.keyboard.down('Control');
-        await page.keyboard.press('a');
-        await page.keyboard.up('Control');
-        await page.keyboard.type(ev.value ?? '');
-        break;
-      case 'contenteditable':
-        await page.evaluate(
-          h => { if (document.activeElement) document.activeElement.innerHTML = h; },
-          ev.html
-        );
-        break;
-    }
-  } catch {}
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`\n[Server] Browser Automation Tool → http://localhost:${PORT}\n`);
 });

@@ -187,10 +187,14 @@ html, body {
 }
 #rec-badge.hidden { display: none; }
 
-#browser-frame {
-  flex: 1;
-  border: none;
-  background: #fff;
+#browser-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: crosshair;
+  background: #1a1a1a;
+  outline: none;
 }
 
 /* ── Recording panel ─────────────────────────────────────────────────────── */

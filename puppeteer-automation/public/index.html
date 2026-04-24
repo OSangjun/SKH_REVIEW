@@ -17,10 +17,9 @@
     </div>
 
     <div id="controls">
-      <button id="record-btn" class="btn btn-record">
+      <button id="record-btn" class="btn btn-record" disabled>
         <span class="dot"></span> 녹화
       </button>
-      <!-- Fix U6: replay speed selector -->
       <div class="speed-wrap">
         <label class="speed-label" for="speed-select">속도</label>
         <select id="speed-select" class="speed-select">
@@ -38,22 +37,18 @@
   </header>
 
   <!-- ── Status bar ── -->
-  <div id="statusbar"><span id="status-text">URL을 입력하고 이동하세요.</span></div>
+  <div id="statusbar"><span id="status-text">서버에 연결 중…</span></div>
 
   <!-- ── Main layout ── -->
   <div id="main">
 
-    <!-- iframe browser area -->
+    <!-- Canvas browser area -->
     <div id="browser-wrap">
       <div id="browser-chrome">
         <span id="frame-url">about:blank</span>
         <span id="rec-badge" class="hidden">● REC</span>
       </div>
-      <iframe
-        id="browser-frame"
-        src="about:blank"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-      ></iframe>
+      <canvas id="browser-canvas" tabindex="0"></canvas>
     </div>
 
     <!-- Recording panel -->
@@ -67,6 +62,17 @@
       </div>
     </aside>
 
+  </div>
+
+  <!-- ── Replay progress overlay ── -->
+  <div id="replay-overlay">
+    <div class="ov-box">
+      <div class="ov-title">▶ 재생 중</div>
+      <div class="ov-name" id="ov-name"></div>
+      <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
+      <div class="ov-progress" id="ov-progress">준비 중…</div>
+      <button class="ov-cancel" id="ov-cancel">취소</button>
+    </div>
   </div>
 
   <script src="/app.js"></script>
