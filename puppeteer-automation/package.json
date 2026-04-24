@@ -4,11 +4,13 @@
   "description": "Records and replays user keyboard/mouse interactions via Puppeteer",
   "main": "src/index.js",
   "scripts": {
-    "record": "node src/index.js record",
-    "replay": "node src/index.js replay",
-    "start": "node src/index.js"
+    "start": "node server.js",
+    "cli:record": "node src/index.js record",
+    "cli:replay": "node src/index.js replay"
   },
   "dependencies": {
+    "cheerio": "^1.2.0",
+    "express": "^5.2.1",
     "puppeteer-core": "^24.42.0"
   }
 }

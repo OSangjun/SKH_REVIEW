@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Browser Automation Tool</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- ── Toolbar ── -->
+  <header id="toolbar">
+    <div id="address-bar">
+      <span class="bar-icon">🌐</span>
+      <input id="url-input" type="text" placeholder="https://example.com 입력 후 Enter 또는 이동 클릭" autocomplete="off" spellcheck="false" />
+      <button id="go-btn" class="btn btn-go">이동</button>
+    </div>
+
+    <div id="controls">
+      <button id="record-btn" class="btn btn-record">
+        <span class="dot"></span> 녹화
+      </button>
+      <button id="replay-btn" class="btn btn-replay" disabled>
+        ▶ 재생
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Status bar ── -->
+  <div id="statusbar"><span id="status-text">URL을 입력하고 이동하세요.</span></div>
+
+  <!-- ── Main layout ── -->
+  <div id="main">
+
+    <!-- iframe browser area -->
+    <div id="browser-wrap">
+      <div id="browser-chrome">
+        <span id="frame-url">about:blank</span>
+        <span id="rec-badge" class="hidden">● REC</span>
+      </div>
+      <iframe
+        id="browser-frame"
+        src="about:blank"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+      ></iframe>
+    </div>
+
+    <!-- Recording panel -->
+    <aside id="rec-panel">
+      <div id="rec-panel-header">
+        <h2>녹화 목록</h2>
+        <span id="rec-count">0개</span>
+      </div>
+      <div id="rec-list">
+        <p class="empty-msg">아직 녹화가 없습니다.</p>
+      </div>
+    </aside>
+
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
