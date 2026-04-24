@@ -1,0 +1,6 @@
+node_modules/
+recordings/*.events.json
+recordings/meta.json
+*.db
+*.db-shm
+*.db-wal
