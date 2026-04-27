@@ -220,6 +220,7 @@ let sessionCookies     = [];
 let replayCookies      = [];
 let replayToasts       = [];    // toast messages captured during replay
 let replayToastActive  = false; // true only while runReplay is running
+let replayCancelled    = false; // set to true by 'cancel-replay' message
 
 // ─── Capture script (injected via evaluateOnNewDocument) ─────────────────────
 // This runs in EVERY page context regardless of how navigation happened
@@ -382,8 +383,6 @@ async function launchSession() {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-web-security',          // allow cross-origin iframes if any
-      '--disable-features=IsolateOrigins,site-per-process',
     ],
     defaultViewport: VIEWPORT,
   });
@@ -675,6 +674,12 @@ async function handleClientMessage(msg, ws) {
       break;
     }
 
+    // ── Cancel replay / suite ────────────────────────────────────────────────
+    case 'cancel-replay':
+      replayCancelled = true;
+      log('warn', '재생 취소 요청됨');
+      break;
+
     // ── Replay ────────────────────────────────────────────────────────────────
     case 'replay': {
       const meta = dbGetMeta(msg.id);
@@ -698,7 +703,12 @@ async function handleClientMessage(msg, ws) {
 
       let suitePass = 0, suiteFail = 0;
 
+      replayCancelled = false;
       for (let i = 0; i < ids.length; i++) {
+        if (replayCancelled) {
+          log('warn', `스위트 취소됨 (${i}/${ids.length} 완료)`);
+          break;
+        }
         const id   = ids[i];
         const meta = dbGetMeta(id);
         if (!meta) { suiteFail++; continue; }
@@ -832,21 +842,23 @@ function normalizeUrl(url) {
   } catch { return url; }
 }
 
-// Shallow JSON field diff — returns array of human-readable difference strings
+// Recursive JSON diff — returns up to MAX_DIFFS human-readable difference strings
+const MAX_DIFFS = 10;
 function jsonDiff(expected, actual, path) {
   path = path || 'root';
   if (typeof expected !== typeof actual)
     return [`${path}: 타입 변경 (${typeof expected} → ${typeof actual})`];
-  if (expected === null || actual === null) {
+  if (expected === null || actual === null)
     return expected !== actual ? [`${path}: null 불일치`] : [];
-  }
   if (Array.isArray(expected) && Array.isArray(actual)) {
     const diffs = [];
     if (expected.length !== actual.length)
       diffs.push(`${path}[]: 길이 변경 (${expected.length} → ${actual.length})`);
-    for (let i = 0; i < Math.min(expected.length, actual.length, 3); i++)
+    for (let i = 0; i < Math.min(expected.length, actual.length); i++) {
       diffs.push(...jsonDiff(expected[i], actual[i], `${path}[${i}]`));
-    return diffs.slice(0, 5);
+      if (diffs.length >= MAX_DIFFS) break;
+    }
+    return diffs.slice(0, MAX_DIFFS);
   }
   if (typeof expected === 'object') {
     const diffs = [];
@@ -855,9 +867,9 @@ function jsonDiff(expected, actual, path) {
       if (!(k in expected)) { diffs.push(`${path}.${k}: 키 추가됨`); continue; }
       if (!(k in actual))   { diffs.push(`${path}.${k}: 키 삭제됨`); continue; }
       diffs.push(...jsonDiff(expected[k], actual[k], `${path}.${k}`));
-      if (diffs.length >= 5) break;
+      if (diffs.length >= MAX_DIFFS) break;
     }
-    return diffs.slice(0, 5);
+    return diffs.slice(0, MAX_DIFFS);
   }
   if (expected !== actual)
     return [`${path}: ${JSON.stringify(expected)} → ${JSON.stringify(actual)}`];
@@ -879,20 +891,24 @@ function compareResponses(recorded, actual) {
 
     const statusPass = rec.status === r.status;
 
-    // Body comparison (only when both sides have a captured body)
+    // Body comparison
     let bodyPass  = true;
     let bodyDiffs = [];
-    if (rec.body !== null && r.body !== null) {
-      // Try JSON field-level diff first
-      try {
-        const recJson = JSON.parse(rec.body);
-        const actJson = JSON.parse(r.body);
-        bodyDiffs = jsonDiff(recJson, actJson);
-        bodyPass  = bodyDiffs.length === 0;
-      } catch {
-        // Fallback: exact string match
-        bodyPass  = rec.body === r.body;
-        if (!bodyPass) bodyDiffs = ['바디 텍스트 불일치'];
+    if (rec.body !== null) {
+      if (r.body === null) {
+        // Recorded had a body but replay failed to capture it
+        bodyPass  = false;
+        bodyDiffs = ['바디 캡처 실패 (재생 시 응답 없음)'];
+      } else {
+        try {
+          const recJson = JSON.parse(rec.body);
+          const actJson = JSON.parse(r.body);
+          bodyDiffs = jsonDiff(recJson, actJson);
+          bodyPass  = bodyDiffs.length === 0;
+        } catch {
+          bodyPass  = rec.body === r.body;
+          if (!bodyPass) bodyDiffs = ['바디 텍스트 불일치'];
+        }
       }
     }
 
@@ -932,6 +948,7 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
 
   replayToasts      = [];
   replayToastActive = true;
+  replayCancelled   = false;
 
   const onPageError = err => {
     jsErrors.push(err.message);
@@ -979,6 +996,10 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     let lastT   = 0;
 
     for (let i = 0; i < total; i++) {
+      if (replayCancelled) {
+        log('warn', `재생 취소됨 (${i}/${total} 완료)`);
+        break;
+      }
       const ev    = events[i];
       const delay = NO_DELAY_EVENTS.has(ev.type)
         ? 0
@@ -1117,7 +1138,10 @@ async function dispatchReplayEvent(ev) {
           try {
             const el = await activePage.$(ev.selector);
             if (el) { await el.click(); break; }
-          } catch {}
+            log('warn', `  [Click] 선택자 미발견, 좌표 폴백: ${ev.selector} → (${ev.x},${ev.y})`);
+          } catch (selErr) {
+            log('warn', `  [Click] 선택자 오류, 좌표 폴백: ${ev.selector} — ${selErr.message}`);
+          }
         }
         await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
@@ -1126,7 +1150,10 @@ async function dispatchReplayEvent(ev) {
           try {
             const el = await activePage.$(ev.selector);
             if (el) { await el.click({ clickCount: 2 }); break; }
-          } catch {}
+            log('warn', `  [DblClick] 선택자 미발견, 좌표 폴백: ${ev.selector} → (${ev.x},${ev.y})`);
+          } catch (selErr) {
+            log('warn', `  [DblClick] 선택자 오류, 좌표 폴백: ${ev.selector} — ${selErr.message}`);
+          }
         }
         await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;

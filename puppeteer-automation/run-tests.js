@@ -194,27 +194,50 @@ function listRecordings(db) {
 
 /**
  * Parse a --cookie argument string into a Puppeteer cookie object.
+ *
  * Format: "name=value[;domain=X][;path=/][;secure][;httpOnly][;sameSite=Lax]"
+ *
+ * Cookie values that contain literal semicolons must be percent-encoded (%3B).
+ * Attribute parsing starts at the FIRST token whose key matches a known
+ * attribute name, so unknown tokens (e.g. an encoded value fragment) are skipped.
  */
 function parseCookieArg(raw) {
-  const parts = raw.split(';').map(p => p.trim());
-  const eqIdx = parts[0].indexOf('=');
+  const ATTRS = new Set(['domain', 'path', 'secure', 'httponly', 'samesite', 'expires', 'max-age']);
+
+  // Split on semicolons, keeping track of where the name=value ends and
+  // attributes begin (first token that looks like a known attribute).
+  const tokens = raw.split(';').map(p => p.trim()).filter(Boolean);
+
+  const eqIdx = tokens[0].indexOf('=');
   if (eqIdx < 0) {
     console.error(`${C.red}Error:${C.reset} Invalid cookie format: "${raw}"`);
     console.error('  Expected: name=value[;domain=X;path=/;secure;httpOnly]');
     process.exit(2);
   }
-  const name  = parts[0].slice(0, eqIdx).trim();
-  const value = parts[0].slice(eqIdx + 1);
+  const name = tokens[0].slice(0, eqIdx).trim();
   if (!name) {
     console.error(`${C.red}Error:${C.reset} Cookie name is empty in: "${raw}"`);
     process.exit(2);
   }
+
+  // Find where the attribute list starts (first token that is a known attr key)
+  let attrStart = tokens.length;
+  for (let i = 1; i < tokens.length; i++) {
+    const key = (tokens[i].indexOf('=') >= 0
+      ? tokens[i].slice(0, tokens[i].indexOf('='))
+      : tokens[i]).trim().toLowerCase();
+    if (ATTRS.has(key)) { attrStart = i; break; }
+  }
+
+  // Everything between tokens[0] key and the first attribute is part of the value
+  const valueParts = [tokens[0].slice(eqIdx + 1), ...tokens.slice(1, attrStart)];
+  const value = decodeURIComponent(valueParts.join(';'));
+
   const cookie = { name, value };
-  for (const part of parts.slice(1)) {
-    const ei  = part.indexOf('=');
-    const key = (ei < 0 ? part : part.slice(0, ei)).trim().toLowerCase();
-    const val = ei < 0 ? undefined : part.slice(ei + 1).trim();
+  for (const token of tokens.slice(attrStart)) {
+    const ei  = token.indexOf('=');
+    const key = (ei < 0 ? token : token.slice(0, ei)).trim().toLowerCase();
+    const val = ei < 0 ? undefined : token.slice(ei + 1).trim();
     switch (key) {
       case 'domain':   cookie.domain   = val;  break;
       case 'path':     cookie.path     = val;  break;
@@ -289,6 +312,7 @@ function buildResponseMap(responses) {
   return map;
 }
 
+const MAX_DIFFS = 10;
 function jsonDiff(expected, actual, path = 'root') {
   if (typeof expected !== typeof actual)
     return [`${path}: type changed (${typeof expected} → ${typeof actual})`];
@@ -298,9 +322,11 @@ function jsonDiff(expected, actual, path = 'root') {
     const diffs = [];
     if (expected.length !== actual.length)
       diffs.push(`${path}[]: length changed (${expected.length} → ${actual.length})`);
-    for (let i = 0; i < Math.min(expected.length, actual.length, 3); i++)
+    for (let i = 0; i < Math.min(expected.length, actual.length); i++) {
       diffs.push(...jsonDiff(expected[i], actual[i], `${path}[${i}]`));
-    return diffs.slice(0, 5);
+      if (diffs.length >= MAX_DIFFS) break;
+    }
+    return diffs.slice(0, MAX_DIFFS);
   }
   if (typeof expected === 'object') {
     const diffs = [];
@@ -309,9 +335,9 @@ function jsonDiff(expected, actual, path = 'root') {
       if (!(k in expected)) { diffs.push(`${path}.${k}: key added`);   continue; }
       if (!(k in actual))   { diffs.push(`${path}.${k}: key removed`); continue; }
       diffs.push(...jsonDiff(expected[k], actual[k], `${path}.${k}`));
-      if (diffs.length >= 5) break;
+      if (diffs.length >= MAX_DIFFS) break;
     }
-    return diffs.slice(0, 5);
+    return diffs.slice(0, MAX_DIFFS);
   }
   return expected !== actual
     ? [`${path}: ${JSON.stringify(expected)} → ${JSON.stringify(actual)}`]
@@ -331,13 +357,18 @@ function compareResponses(recorded, actual) {
     const rec        = recList[0];
     const statusPass = rec.status === r.status;
     let bodyPass = true, bodyDiffs = [];
-    if (rec.body !== null && r.body !== null) {
-      try {
-        bodyDiffs = jsonDiff(JSON.parse(rec.body), JSON.parse(r.body));
-        bodyPass  = bodyDiffs.length === 0;
-      } catch {
-        bodyPass  = rec.body === r.body;
-        if (!bodyPass) bodyDiffs = ['body text mismatch'];
+    if (rec.body !== null) {
+      if (r.body === null) {
+        bodyPass  = false;
+        bodyDiffs = ['body capture failed (no response body in replay)'];
+      } else {
+        try {
+          bodyDiffs = jsonDiff(JSON.parse(rec.body), JSON.parse(r.body));
+          bodyPass  = bodyDiffs.length === 0;
+        } catch {
+          bodyPass  = rec.body === r.body;
+          if (!bodyPass) bodyDiffs = ['body text mismatch'];
+        }
       }
     }
     results.push({
@@ -502,7 +533,10 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
   const recordedToasts  = tryJson(rec.toasts, []);
   const cookies         = mergeCookies(tryJson(rec.cookies, []), cliCookies);
 
-  const page = await browser.newPage();
+  // Each recording runs in a fresh incognito context so sessions never bleed
+  // between tests (cookies, localStorage, service workers are all isolated).
+  const context = await browser.createBrowserContext();
+  const page    = await context.newPage();
   await page.setViewport(VIEWPORT);
 
   // Expose toast capture bridge before any navigation
@@ -594,7 +628,7 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
     page.off('response', onResponse);
     if (pending.size > 0)
       await Promise.race([Promise.allSettled([...pending]), sleep(2000)]);
-    await page.close();
+    await context.close(); // closes page + wipes all context state
   }
 
   const duration       = (Date.now() - startMs) / 1000;
@@ -796,6 +830,16 @@ async function main() {
     process.exit(2);
   }
 
+  // Warn about requested IDs that don't exist in the DB
+  if (opts.ids.length > 0) {
+    const foundIds = new Set(rows.map(r => r.id));
+    const missing  = opts.ids.filter(id => !foundIds.has(id));
+    if (missing.length > 0) {
+      console.error(`${C.red}Error:${C.reset} Recording ID(s) not found: ${missing.join(', ')}`);
+      process.exit(2);
+    }
+  }
+
   const cliCookies = [
     ...opts.cookies.map(parseCookieArg),
     ...(opts.cookieFile ? loadCookieFile(opts.cookieFile) : []),
@@ -817,8 +861,6 @@ async function main() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-web-security',
-        '--disable-features=IsolateOrigins,site-per-process',
       ],
       defaultViewport: VIEWPORT,
     });

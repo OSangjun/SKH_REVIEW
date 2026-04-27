@@ -55,20 +55,31 @@
   function setStatus(msg) { statusText.textContent = msg; }
 
   // ── WebSocket connection ───────────────────────────────────────────────────────
+  const WS_MAX_RETRIES = 10;
+  const WS_BASE_DELAY  = 2000;
+  let wsRetry = 0;
+
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}`);
 
     ws.addEventListener('open', () => {
-      wsReady = true;
+      wsReady  = true;
+      wsRetry  = 0;
       setStatus('연결됨. URL을 입력하고 이동하세요.');
     });
 
     ws.addEventListener('close', () => {
       wsReady = false;
       recordBtn.disabled = true;
-      setStatus('서버 연결이 끊겼습니다. 재연결 중…');
-      setTimeout(connect, 2000);
+      if (wsRetry >= WS_MAX_RETRIES) {
+        setStatus('서버에 연결할 수 없습니다. 페이지를 새로고침하세요.');
+        return;
+      }
+      const delay = Math.min(WS_BASE_DELAY * Math.pow(2, wsRetry), 30000);
+      wsRetry++;
+      setStatus(`서버 연결이 끊겼습니다. ${(delay / 1000).toFixed(0)}초 후 재연결 중… (${wsRetry}/${WS_MAX_RETRIES})`);
+      setTimeout(connect, delay);
     });
 
     ws.addEventListener('error', () => {});
@@ -370,8 +381,10 @@
   }
 
   ovCancel.addEventListener('click', () => {
+    send({ type: 'cancel-replay' });
     hideOverlay();
     isReplaying = false;
+    suiteMode   = false;
     replayBtn.disabled  = selectedId === null;
     recordBtn.disabled  = false;
     setStatus('재생 취소됨.');
