@@ -348,6 +348,11 @@
   }
 
   // ── Render recording list ─────────────────────────────────────────────────────
+  function renderTagChips(tags) {
+    if (!Array.isArray(tags) || tags.length === 0) return '';
+    return `<div class="rec-tags">${tags.map(t => `<span class="tag-chip">${esc(t)}</span>`).join('')}</div>`;
+  }
+
   function renderList() {
     recCount.textContent = `${recordings.length}개`;
 
@@ -357,16 +362,23 @@
     }
 
     recList.innerHTML = recordings
-      .slice()
-      .reverse()
+      .slice().reverse()
       .map(rec => {
         const isSel = rec.id === selectedId;
+        const tags  = Array.isArray(rec.tags) ? rec.tags : [];
+        const desc  = rec.description || '';
         return `
 <div class="rec-item${isSel ? ' selected' : ''}" data-id="${rec.id}">
   <div class="rec-item-head">
     <span class="rec-num">#${rec.id}</span>
-    <button class="rec-del" data-id="${rec.id}" title="삭제">✕</button>
+    <div style="display:flex;gap:4px;align-items:center">
+      <button class="rec-edit" data-id="${rec.id}" title="이름/설명/태그 편집">✏️</button>
+      <button class="rec-del"  data-id="${rec.id}" title="삭제">✕</button>
+    </div>
   </div>
+  <div class="rec-name" data-id="${rec.id}">${esc(rec.name)}</div>
+  ${desc ? `<div class="rec-desc">${esc(desc)}</div>` : ''}
+  ${renderTagChips(tags)}
   <span class="rec-url" title="${esc(rec.url)}">${esc(trimUrl(rec.url))}</span>
   <div class="rec-meta">
     <span>${rec.eventCount}개 이벤트</span>
@@ -379,23 +391,76 @@
     <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">📥 JSON</button>
     <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">📜 Script</button>
   </div>
+  <div class="rec-edit-form hidden" data-id="${rec.id}">
+    <input  class="edit-name-input"  type="text"     value="${esc(rec.name)}"  placeholder="이름" />
+    <textarea class="edit-desc-input" rows="2"        placeholder="설명 (선택)">${esc(desc)}</textarea>
+    <div class="edit-tags-wrap">
+      ${tags.map(t => `<span class="tag-chip editable" data-tag="${esc(t)}">${esc(t)}<button class="tag-rm" data-tag="${esc(t)}">×</button></span>`).join('')}
+      <input class="edit-tag-input" type="text" placeholder="태그 입력 후 Enter" />
+    </div>
+    <div class="edit-form-btns">
+      <button class="btn-edit-cancel" data-id="${rec.id}">취소</button>
+      <button class="btn-edit-save"   data-id="${rec.id}">저장</button>
+    </div>
+  </div>
 </div>`;
       })
       .join('');
   }
 
+  // ── Inline edit helpers ───────────────────────────────────────────────────────
+  function openEditForm(id) {
+    const item = recList.querySelector(`.rec-item[data-id="${id}"]`);
+    if (!item) return;
+    item.querySelector('.rec-edit-form').classList.remove('hidden');
+
+    // Tag-input: add chip on Enter
+    const tagInput = item.querySelector('.edit-tag-input');
+    tagInput.addEventListener('keydown', function handler(e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const val = tagInput.value.trim();
+      if (!val) return;
+      tagInput.value = '';
+      const wrap = item.querySelector('.edit-tags-wrap');
+      const chip = document.createElement('span');
+      chip.className = 'tag-chip editable';
+      chip.dataset.tag = val;
+      chip.innerHTML = `${esc(val)}<button class="tag-rm" data-tag="${esc(val)}">×</button>`;
+      wrap.insertBefore(chip, tagInput);
+    });
+  }
+
+  function saveEditForm(id) {
+    const item = recList.querySelector(`.rec-item[data-id="${id}"]`);
+    if (!item) return;
+    const name  = item.querySelector('.edit-name-input').value.trim();
+    const desc  = item.querySelector('.edit-desc-input').value.trim();
+    const tags  = Array.from(item.querySelectorAll('.tag-chip.editable[data-tag]'))
+                    .map(c => c.dataset.tag).filter(Boolean);
+    send({ type: 'update-recording', id, name, description: desc, tags });
+  }
+
   recList.addEventListener('click', e => {
     const del     = e.target.closest('.rec-del');
+    const edit    = e.target.closest('.rec-edit');
+    const cancel  = e.target.closest('.btn-edit-cancel');
+    const save    = e.target.closest('.btn-edit-save');
+    const tagRm   = e.target.closest('.tag-rm');
     const rep     = e.target.closest('.btn-rec-replay');
     const xjson   = e.target.closest('.btn-rec-json');
     const xscript = e.target.closest('.btn-rec-script');
     const item    = e.target.closest('.rec-item');
 
     if (del)     { e.stopPropagation(); deleteRecording(+del.dataset.id);   return; }
+    if (edit)    { e.stopPropagation(); openEditForm(+edit.dataset.id);     return; }
+    if (cancel)  { e.stopPropagation(); renderList();                        return; }
+    if (save)    { e.stopPropagation(); saveEditForm(+save.dataset.id);     return; }
+    if (tagRm)   { e.stopPropagation(); tagRm.closest('.tag-chip').remove(); return; }
     if (rep)     { e.stopPropagation(); replayRecording(+rep.dataset.id);   return; }
     if (xjson)   { e.stopPropagation(); exportJson(+xjson.dataset.id);      return; }
     if (xscript) { e.stopPropagation(); exportScript(+xscript.dataset.id);  return; }
-    if (item) {
+    if (item && !e.target.closest('.rec-edit-form')) {
       selectedId = +item.dataset.id;
       replayBtn.disabled = false;
       renderList();

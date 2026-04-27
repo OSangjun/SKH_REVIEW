@@ -40,23 +40,34 @@ db.exec(`
     event_count INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL,
     events      TEXT    NOT NULL DEFAULT '[]',
-    responses   TEXT    NOT NULL DEFAULT '[]'
+    responses   TEXT    NOT NULL DEFAULT '[]',
+    description TEXT    NOT NULL DEFAULT '',
+    tags        TEXT    NOT NULL DEFAULT '[]'
   )
 `);
-// Add responses column to existing DBs (safe no-op if already present)
-try { db.exec(`ALTER TABLE recordings ADD COLUMN responses TEXT NOT NULL DEFAULT '[]'`); } catch {}
+// Safe migrations for existing DBs
+for (const col of [
+  `ALTER TABLE recordings ADD COLUMN responses   TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE recordings ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
+]) { try { db.exec(col); } catch {} }
 
 const stmts = {
   insertRecording: db.prepare(
     `INSERT INTO recordings (name, url, event_count, created_at, events, responses)
      VALUES (@name, @url, @event_count, @created_at, @events, @responses)`
   ),
+  updateMeta: db.prepare(
+    `UPDATE recordings SET name=@name, description=@description, tags=@tags WHERE id=@id`
+  ),
   allMeta: db.prepare(
-    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
+    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt,
+            description, tags
      FROM recordings ORDER BY id`
   ),
   getMeta: db.prepare(
-    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
+    `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt,
+            description, tags
      FROM recordings WHERE id = ?`
   ),
   getEvents:     db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
@@ -95,17 +106,24 @@ const stmts = {
   }
 })();
 
-function dbAllMeta()              { return stmts.allMeta.all(); }
-function dbGetMeta(id)            { return stmts.getMeta.get(id) ?? null; }
+function parseMeta(row) {
+  if (!row) return null;
+  return { ...row, tags: tryJson(row.tags, []) };
+}
+function tryJson(s, def) { try { return JSON.parse(s); } catch { return def; } }
+
+function dbAllMeta()   { return stmts.allMeta.all().map(parseMeta); }
+function dbGetMeta(id) { return parseMeta(stmts.getMeta.get(id)); }
+
 function dbLoadEvents(id) {
   const row = stmts.getEvents.get(id);
   if (!row) return null;
-  try { return JSON.parse(row.events); } catch { return null; }
+  return tryJson(row.events, null);
 }
 function dbLoadResponses(id) {
   const row = stmts.getResponses.get(id);
   if (!row) return [];
-  try { return JSON.parse(row.responses); } catch { return []; }
+  return tryJson(row.responses, []);
 }
 function dbSaveRecording(name, url, eventCount, createdAt, events, responses) {
   const info = stmts.insertRecording.run({
@@ -117,6 +135,9 @@ function dbSaveRecording(name, url, eventCount, createdAt, events, responses) {
   });
   return info.lastInsertRowid;
 }
+function dbUpdateMeta(id, name, description, tags) {
+  stmts.updateMeta.run({ id, name, description, tags: JSON.stringify(tags) });
+}
 function dbDeleteRecording(id) { stmts.deleteRecording.run(id); }
 
 // ─── Puppeteer session state ──────────────────────────────────────────────────
@@ -126,10 +147,11 @@ let activePage    = null;   // current page
 let cdpSession    = null;   // CDP session for screencasting
 let activeWs      = null;   // connected frontend WebSocket
 
-let isRecording        = false;
-let capturedEvents     = [];
-let capturedResponses  = [];    // HTTP responses recorded during a session
-let recordingStartTime = null;
+let isRecording           = false;
+let capturedEvents        = [];
+let capturedResponses     = [];    // HTTP responses recorded during a session
+let pendingRespPromises   = new Set(); // in-flight body reads
+let recordingStartTime    = null;
 let currentUrl         = 'about:blank';
 let firstNavigateDone  = false; // suppress navigate event on very first load
 let sessionCookies     = [];    // cookies applied on every navigation
@@ -152,10 +174,55 @@ function buildCaptureScript() {
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
-    document.addEventListener('click',
-      e => cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
-    document.addEventListener('dblclick',
-      e => cap('dblclick', { x: e.clientX, y: e.clientY }), true);
+    // Build a stable CSS selector for an element.
+    // Priority: data-testid / id / aria-label → CSS path (max 4 levels)
+    function getSelector(el) {
+      if (!el || el.nodeType !== 1) return '';
+      // Stable test attributes
+      for (const attr of ['data-testid','data-test','data-cy','data-qa','data-id']) {
+        const v = el.getAttribute(attr);
+        if (v) return '[' + attr + '=' + JSON.stringify(v) + ']';
+      }
+      // ID
+      if (el.id) {
+        try { return '#' + CSS.escape(el.id); } catch { return '#' + el.id; }
+      }
+      // aria-label (buttons / links)
+      const label = el.getAttribute('aria-label');
+      if (label && (el.tagName === 'BUTTON' || el.tagName === 'A'))
+        return el.tagName.toLowerCase() + '[aria-label=' + JSON.stringify(label) + ']';
+      // CSS path — walk up max 4 ancestors
+      const parts = [];
+      let cur = el;
+      for (let d = 0; d < 4 && cur && cur.tagName && cur !== document.documentElement; d++) {
+        if (cur.id) {
+          try { parts.unshift('#' + CSS.escape(cur.id)); } catch { parts.unshift('#' + cur.id); }
+          break;
+        }
+        let part = cur.tagName.toLowerCase();
+        const sibs = cur.parentElement
+          ? Array.from(cur.parentElement.children).filter(c => c.tagName === cur.tagName)
+          : [];
+        if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
+        parts.unshift(part);
+        cur = cur.parentElement;
+      }
+      return parts.join(' > ');
+    }
+
+    function elText(el) {
+      return (el.getAttribute('aria-label') || el.textContent || el.value || '')
+        .trim().replace(/\\s+/g, ' ').slice(0, 60);
+    }
+
+    document.addEventListener('click', e => {
+      const sel = getSelector(e.target);
+      cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button),
+                     selector: sel, text: elText(e.target) });
+    }, true);
+    document.addEventListener('dblclick', e => {
+      cap('dblclick', { x: e.clientX, y: e.clientY, selector: getSelector(e.target) });
+    }, true);
     document.addEventListener('mousedown',
       e => cap('mousedown', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
     document.addEventListener('mouseup',
@@ -191,15 +258,16 @@ function buildCaptureScript() {
       const el = e.target;
       if (!el) return;
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        cap('input', { value: el.value });
+        cap('input', { value: el.value, selector: getSelector(el) });
       } else if (el.isContentEditable) {
-        cap('contenteditable', { html: el.innerHTML, text: el.innerText });
+        cap('contenteditable', { html: el.innerHTML, text: el.innerText,
+                                 selector: getSelector(el) });
       }
     }, true);
 
     document.addEventListener('change', e => {
       if (e.target && e.target.tagName === 'SELECT')
-        cap('select', { value: e.target.value });
+        cap('select', { value: e.target.value, selector: getSelector(e.target) });
     }, true);
   })();`;
 }
@@ -252,13 +320,34 @@ async function launchSession() {
     send({ type: 'url-changed', url });
   });
 
-  // Capture HTTP responses during recording
+  // Capture HTTP responses (with body) during recording
   activePage.on('response', response => {
     if (!isRecording) return;
     const url = response.url();
     if (url.startsWith('data:') || url.startsWith('blob:')) return;
-    const t = Date.now() - (recordingStartTime ?? Date.now());
-    capturedResponses.push({ url, status: response.status(), t });
+
+    const ct     = (response.headers()['content-type'] || '').toLowerCase();
+    const wantBody = /json|text\/plain|xml/.test(ct);
+    const status = response.status();
+    const t      = Date.now() - (recordingStartTime ?? Date.now());
+
+    if (!wantBody) {
+      capturedResponses.push({ url, status, contentType: ct, body: null, t });
+      return;
+    }
+
+    // Async body read — track promise so stop-recording can await it
+    const p = response.buffer()
+      .then(buf => {
+        const body = buf.length <= 51200 ? buf.toString('utf8') : null;
+        capturedResponses.push({ url, status, contentType: ct, body, t });
+      })
+      .catch(() => {
+        capturedResponses.push({ url, status, contentType: ct, body: null, t });
+      })
+      .finally(() => pendingRespPromises.delete(p));
+
+    pendingRespPromises.add(p);
   });
 
   // Handle page crashes / unexpected closes
@@ -396,6 +485,7 @@ async function handleClientMessage(msg, ws) {
       isRecording        = true;
       capturedEvents     = [];
       capturedResponses  = [];
+      pendingRespPromises = new Set();
       recordingStartTime = null;
       firstNavigateDone  = true;
       ws.send(JSON.stringify({ type: 'recording-started' }));
@@ -404,6 +494,12 @@ async function handleClientMessage(msg, ws) {
 
     case 'stop-recording': {
       isRecording = false;
+      // Wait for any in-flight body reads (up to 2 s)
+      if (pendingRespPromises.size > 0)
+        await Promise.race([
+          Promise.allSettled([...pendingRespPromises]),
+          sleep(2000),
+        ]);
       console.log(`[Recording] Stopped — ${capturedEvents.length} events, ${capturedResponses.length} responses`);
       if (capturedEvents.length === 0) {
         ws.send(JSON.stringify({ type: 'recording-empty' }));
@@ -439,6 +535,15 @@ async function handleClientMessage(msg, ws) {
       break;
     }
 
+    // ── Update metadata (name / description / tags) ───────────────────────────
+    case 'update-recording': {
+      const { id, name, description, tags } = msg;
+      if (!dbGetMeta(id)) break;
+      dbUpdateMeta(id, (name || '').trim(), (description || '').trim(), Array.isArray(tags) ? tags : []);
+      ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
+      break;
+    }
+
     // ── Delete ────────────────────────────────────────────────────────────────
     case 'delete-recording': {
       dbDeleteRecording(msg.id);
@@ -461,13 +566,13 @@ async function waitNetworkIdle(timeout = 5000) {
 // Events that typically trigger network requests and warrant idle-waiting
 const NETWORK_EVENTS = new Set(['navigate', 'click', 'dblclick']);
 
-// Build a lookup map from URL → [recorded statuses] for comparison
+// Build a lookup map: normalizedUrl → [recorded response objects]
 function buildResponseMap(responses) {
   const map = new Map();
   for (const r of responses) {
     const key = normalizeUrl(r.url);
     if (!map.has(key)) map.set(key, []);
-    map.get(key).push(r.status);
+    map.get(key).push(r);
   }
   return map;
 }
@@ -475,20 +580,82 @@ function buildResponseMap(responses) {
 function normalizeUrl(url) {
   try {
     const u = new URL(url);
-    u.search = ''; // strip query params (tokens, timestamps etc. vary per run)
+    u.search = ''; // strip query params (session tokens, timestamps, etc.)
     return u.toString();
   } catch { return url; }
 }
 
+// Shallow JSON field diff — returns array of human-readable difference strings
+function jsonDiff(expected, actual, path) {
+  path = path || 'root';
+  if (typeof expected !== typeof actual)
+    return [`${path}: 타입 변경 (${typeof expected} → ${typeof actual})`];
+  if (expected === null || actual === null) {
+    return expected !== actual ? [`${path}: null 불일치`] : [];
+  }
+  if (Array.isArray(expected) && Array.isArray(actual)) {
+    const diffs = [];
+    if (expected.length !== actual.length)
+      diffs.push(`${path}[]: 길이 변경 (${expected.length} → ${actual.length})`);
+    for (let i = 0; i < Math.min(expected.length, actual.length, 3); i++)
+      diffs.push(...jsonDiff(expected[i], actual[i], `${path}[${i}]`));
+    return diffs.slice(0, 5);
+  }
+  if (typeof expected === 'object') {
+    const diffs = [];
+    const keys = new Set([...Object.keys(expected), ...Object.keys(actual)]);
+    for (const k of keys) {
+      if (!(k in expected)) { diffs.push(`${path}.${k}: 키 추가됨`); continue; }
+      if (!(k in actual))   { diffs.push(`${path}.${k}: 키 삭제됨`); continue; }
+      diffs.push(...jsonDiff(expected[k], actual[k], `${path}.${k}`));
+      if (diffs.length >= 5) break;
+    }
+    return diffs.slice(0, 5);
+  }
+  if (expected !== actual)
+    return [`${path}: ${JSON.stringify(expected)} → ${JSON.stringify(actual)}`];
+  return [];
+}
+
 function compareResponses(recorded, actual) {
-  const recMap = buildResponseMap(recorded);
+  const recMap  = buildResponseMap(recorded);
   const results = [];
+
   for (const r of actual) {
     const key      = normalizeUrl(r.url);
-    const expected = recMap.get(key);
-    if (!expected) continue;          // new URL not in recording — skip
-    const match = expected.includes(r.status);
-    results.push({ url: r.url, expected: expected[0], actual: r.status, pass: match });
+    const recList  = recMap.get(key);
+    if (!recList) continue;           // URL not in recording — skip
+    const rec = recList[0];           // compare against first recorded hit
+
+    const statusPass = rec.status === r.status;
+
+    // Body comparison (only when both sides have a captured body)
+    let bodyPass  = true;
+    let bodyDiffs = [];
+    if (rec.body !== null && r.body !== null) {
+      // Try JSON field-level diff first
+      try {
+        const recJson = JSON.parse(rec.body);
+        const actJson = JSON.parse(r.body);
+        bodyDiffs = jsonDiff(recJson, actJson);
+        bodyPass  = bodyDiffs.length === 0;
+      } catch {
+        // Fallback: exact string match
+        bodyPass  = rec.body === r.body;
+        if (!bodyPass) bodyDiffs = ['바디 텍스트 불일치'];
+      }
+    }
+
+    const pass = statusPass && bodyPass;
+    results.push({
+      url: r.url,
+      expectedStatus: rec.status,
+      actualStatus:   r.status,
+      statusPass,
+      bodyPass,
+      bodyDiffs,
+      pass,
+    });
   }
   return results;
 }
@@ -497,25 +664,60 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
   ws.send(JSON.stringify({ type: 'replay-started' }));
   log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
 
-  const replayResponses = [];
-  const onResponse = response => {
-    const url    = response.url();
-    const status = response.status();
-    if (url.startsWith('data:') || url.startsWith('blob:')) return;
-    replayResponses.push({ url, status });
+  const replayResponses    = [];
+  const replayRespPending  = new Set();
+  const recMap             = buildResponseMap(recordedResponses);
 
-    // Live-log each response during replay
+  const onResponse = response => {
+    const url = response.url();
+    if (url.startsWith('data:') || url.startsWith('blob:')) return;
+    const ct     = (response.headers()['content-type'] || '').toLowerCase();
+    const status = response.status();
+    const wantBody = /json|text\/plain|xml/.test(ct);
+
     const key      = normalizeUrl(url);
-    const recMap   = buildResponseMap(recordedResponses);
-    const expected = recMap.get(key);
-    if (expected) {
-      const pass = expected.includes(status);
-      const short = url.length > 80 ? url.slice(0, 77) + '…' : url;
-      if (pass)
-        log('success', `[HTTP ${status}] ✓ ${short}`);
-      else
-        log('fail',    `[HTTP ${status}] ✗ ${short}  (기대: ${expected[0]})`);
+    const recList  = recMap.get(key);
+    const short    = url.length > 80 ? url.slice(0, 77) + '…' : url;
+
+    if (!wantBody) {
+      replayResponses.push({ url, status, contentType: ct, body: null });
+      if (recList) {
+        const pass = recList[0].status === status;
+        log(pass ? 'success' : 'fail',
+          `[HTTP ${status}] ${pass ? '✓' : '✗'} ${short}${pass ? '' : `  (기대: ${recList[0].status})`}`);
+      }
+      return;
     }
+
+    const p = response.buffer()
+      .then(buf => {
+        const body = buf.length <= 51200 ? buf.toString('utf8') : null;
+        replayResponses.push({ url, status, contentType: ct, body });
+
+        if (recList) {
+          const rec       = recList[0];
+          const statusOk  = rec.status === status;
+          let bodyOk      = true;
+          let diffSummary = '';
+          if (rec.body !== null && body !== null) {
+            try {
+              const diffs = jsonDiff(JSON.parse(rec.body), JSON.parse(body));
+              bodyOk      = diffs.length === 0;
+              if (!bodyOk) diffSummary = '  ' + diffs[0];
+            } catch {
+              bodyOk      = rec.body === body;
+              if (!bodyOk) diffSummary = '  바디 텍스트 불일치';
+            }
+          }
+          const pass = statusOk && bodyOk;
+          log(pass ? 'success' : 'fail',
+            `[HTTP ${status}] ${pass ? '✓' : '✗'} ${short}${diffSummary}`);
+        }
+      })
+      .catch(() => replayResponses.push({ url, status, contentType: ct, body: null }))
+      .finally(() => replayRespPending.delete(p));
+
+    replayRespPending.add(p);
   };
   activePage.on('response', onResponse);
 
@@ -543,9 +745,9 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
         case 'navigate':
           log('info',  `[Navigate] ${ev.url}`); break;
         case 'click':
-          log('info',  `[Click] (${ev.x}, ${ev.y})  button=${ev.button ?? 'left'}`); break;
+          log('info',  `[Click] ${ev.selector || `(${ev.x},${ev.y})`}${ev.text ? '  "' + ev.text + '"' : ''}`); break;
         case 'dblclick':
-          log('info',  `[DblClick] (${ev.x}, ${ev.y})`); break;
+          log('info',  `[DblClick] ${ev.selector || `(${ev.x},${ev.y})`}`); break;
         case 'keydown':
           if (ev.key === 'Enter') log('info', `[Enter] 폼 제출 또는 키 입력`);
           break;
@@ -566,6 +768,9 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
     log('fail', `재생 오류: ${err.message}`);
   } finally {
     activePage.off('response', onResponse);
+    // Wait for in-flight body reads
+    if (replayRespPending.size > 0)
+      await Promise.race([Promise.allSettled([...replayRespPending]), sleep(2000)]);
   }
 
   // Compare recorded vs actual responses
@@ -587,6 +792,15 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
     log('info', '━━ 재생 완료 (응답 비교 없음) ━━');
   }
 
+  // Log body diffs for failures
+  for (const r of results.filter(x => !x.pass)) {
+    const short = r.url.length > 70 ? r.url.slice(0, 67) + '…' : r.url;
+    if (!r.statusPass)
+      log('fail', `  상태코드 불일치 ${short}: ${r.expectedStatus} → ${r.actualStatus}`);
+    for (const d of r.bodyDiffs.slice(0, 3))
+      log('fail', `  바디 diff: ${d}`);
+  }
+
   ws.send(JSON.stringify({ type: 'replay-done' }));
   ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length }));
 }
@@ -600,12 +814,28 @@ async function dispatchReplayEvent(ev) {
         if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
         await activePage.goto(ev.url, { waitUntil: 'networkidle2', timeout: 30000 });
         break;
-      case 'click':
-        await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
+      case 'click': {
+        let done = false;
+        if (ev.selector) {
+          try {
+            await activePage.locator(ev.selector).click({ timeout: 3000 });
+            done = true;
+          } catch {}
+        }
+        if (!done) await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
-      case 'dblclick':
-        await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
+      }
+      case 'dblclick': {
+        let done = false;
+        if (ev.selector) {
+          try {
+            await activePage.locator(ev.selector).click({ clickCount: 2, timeout: 3000 });
+            done = true;
+          } catch {}
+        }
+        if (!done) await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;
+      }
       case 'mousedown':
         await activePage.mouse.move(ev.x, ev.y);
         await activePage.mouse.down({ button: BTN(ev.button) });
@@ -629,12 +859,22 @@ async function dispatchReplayEvent(ev) {
       case 'keyup':
         await activePage.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
         break;
-      case 'input':
-        await activePage.keyboard.down('Control');
-        await activePage.keyboard.press('a');
-        await activePage.keyboard.up('Control');
-        await activePage.keyboard.type(ev.value ?? '');
+      case 'input': {
+        let done = false;
+        if (ev.selector) {
+          try {
+            await activePage.locator(ev.selector).fill(ev.value ?? '', { timeout: 3000 });
+            done = true;
+          } catch {}
+        }
+        if (!done) {
+          await activePage.keyboard.down('Control');
+          await activePage.keyboard.press('a');
+          await activePage.keyboard.up('Control');
+          await activePage.keyboard.type(ev.value ?? '');
+        }
         break;
+      }
       case 'contenteditable':
         await activePage.evaluate(
           h => { if (document.activeElement) document.activeElement.innerHTML = h; },
