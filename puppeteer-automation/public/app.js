@@ -45,6 +45,7 @@
   let suitePass     = 0;
   let suiteFail     = 0;
   let recordings    = [];
+  let currentPageUrl = '';
   let selectedId    = null;
   let checkedIds    = new Set();
   let historyMap    = {};
@@ -115,6 +116,8 @@
       case 'url-changed':
         frameUrlLabel.textContent = msg.url || 'about:blank';
         urlInput.value = msg.url && msg.url !== 'about:blank' ? msg.url : urlInput.value;
+        currentPageUrl = msg.url || '';
+        renderList();
         break;
 
       case 'recording-started':
@@ -472,15 +475,36 @@
     return `<div class="history-dots">${dots}</div>`;
   }
 
+  // Page-key for filtering: same origin + pathname counts as same page,
+  // ignoring query string and hash so /orders?status=A and /orders?status=B
+  // both belong to the /orders page.
+  function pageKey(url) {
+    if (!url) return '';
+    try {
+      const u = new URL(url);
+      return u.origin + u.pathname;
+    } catch {
+      return '';
+    }
+  }
+
   function renderList() {
-    recCount.textContent = `${recordings.length}개`;
+    const curKey = pageKey(currentPageUrl);
+    const visible = curKey
+      ? recordings.filter(r => pageKey(r.url) === curKey)
+      : [];
+    recCount.textContent = `${visible.length}개`;
 
     if (recordings.length === 0) {
       recList.innerHTML = '<p class="empty-msg">아직 녹화가 없습니다.</p>';
       return;
     }
+    if (visible.length === 0) {
+      recList.innerHTML = '<p class="empty-msg">현재 페이지에 해당하는 녹화가 없습니다.</p>';
+      return;
+    }
 
-    recList.innerHTML = recordings
+    recList.innerHTML = visible
       .slice().reverse()
       .map(rec => {
         const isSel    = rec.id === selectedId;

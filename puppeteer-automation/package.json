@@ -5,14 +5,16 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node server.js",
-    "test":  "node run-tests.js --all",
-    "test:junit": "node run-tests.js --all --junit test-results.xml",
+    "test": "node run-tests.js --all --fast",
+    "test:slow": "node run-tests.js --all",
+    "test:junit": "node run-tests.js --all --fast --junit test-results.xml",
     "cli:record": "node src/index.js record",
     "cli:replay": "node src/index.js replay"
   },
   "dependencies": {
     "better-sqlite3": "^12.9.0",
     "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "puppeteer-core": "^24.42.0",
     "ws": "^8.20.0"
