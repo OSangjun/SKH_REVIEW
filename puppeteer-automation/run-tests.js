@@ -154,14 +154,14 @@ function fetchRecordings(db, opts) {
   if (opts.all) {
     return db.prepare(
       `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt,
-              description, events, responses, cookies
+              description, events, responses, cookies, toasts
        FROM recordings ORDER BY id`
     ).all();
   }
   const ph = opts.ids.map(() => '?').join(',');
   return db.prepare(
     `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt,
-            description, events, responses, cookies
+            description, events, responses, cookies, toasts
      FROM recordings WHERE id IN (${ph}) ORDER BY id`
   ).all(...opts.ids);
 }
@@ -347,6 +347,46 @@ function compareResponses(recorded, actual) {
   return results;
 }
 
+function compareToasts(recorded, actual) {
+  const actSet = new Set(actual.map(t => (typeof t === 'string' ? t : t.text).trim()));
+  return recorded.map(r => {
+    const text = (typeof r === 'string' ? r : r.text).trim();
+    return { text, pass: actSet.has(text) };
+  });
+}
+
+const TOAST_OBSERVER_SCRIPT = `(function() {
+  if (window.__CDP_TOAST_OBSERVER__) return;
+  window.__CDP_TOAST_OBSERVER__ = true;
+  var seen = new WeakSet();
+  var obs  = new MutationObserver(function(muts) {
+    for (var i = 0; i < muts.length; i++) {
+      var added = muts[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType !== 1) continue;
+        var els = (node.matches && node.matches('[role="alert"],[role="status"]'))
+          ? [node]
+          : (node.querySelectorAll
+              ? Array.prototype.slice.call(node.querySelectorAll('[role="alert"],[role="status"]'))
+              : []);
+        for (var k = 0; k < els.length; k++) {
+          var el = els[k];
+          if (seen.has(el)) continue;
+          seen.add(el);
+          var text = (el.innerText || el.textContent || '').trim();
+          if (text && window.__captureToast) window.__captureToast(text);
+        }
+      }
+    }
+  });
+  function start() {
+    if (document.body) obs.observe(document.body, { childList: true, subtree: true });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();`;
+
 async function waitNetworkIdle(page, timeout) {
   try { await page.waitForNetworkIdle({ idleTime: 500, timeout }); } catch {}
 }
@@ -402,12 +442,18 @@ async function dispatchEvent(page, ev, baseUrl) {
 // ── Core replay function ───────────────────────────────────────────────────────
 
 async function replayRecording(browser, rec, opts, cliCookies = []) {
-  const events   = tryJson(rec.events, []);
-  const recorded = tryJson(rec.responses, []);
-  const cookies  = mergeCookies(tryJson(rec.cookies, []), cliCookies);
+  const events          = tryJson(rec.events, []);
+  const recorded        = tryJson(rec.responses, []);
+  const recordedToasts  = tryJson(rec.toasts, []);
+  const cookies         = mergeCookies(tryJson(rec.cookies, []), cliCookies);
 
   const page = await browser.newPage();
   await page.setViewport(VIEWPORT);
+
+  // Expose toast capture bridge before any navigation
+  const replayToasts = [];
+  await page.exposeFunction('__captureToast', text => { replayToasts.push(text); });
+  await page.evaluateOnNewDocument(TOAST_OBSERVER_SCRIPT);
 
   const replayResponses = [];
   const pending   = new Set();
@@ -485,11 +531,13 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
 
   const duration     = (Date.now() - startMs) / 1000;
   const results      = recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
+  const toastResults = compareToasts(recordedToasts, replayToasts);
   const passed       = results.filter(r => r.pass).length;
   const httpFailed   = results.filter(r => !r.pass).length;
-  const failed       = httpFailed + jsErrors.length;
+  const toastFailed  = toastResults.filter(r => !r.pass).length;
+  const failed       = httpFailed + toastFailed + jsErrors.length;
 
-  return { rec, results, passed, failed, total: results.length, duration, error, jsErrors };
+  return { rec, results, toastResults, passed, failed, total: results.length + toastResults.length, duration, error, jsErrors };
 }
 
 // ── Output formatters ─────────────────────────────────────────────────────────
@@ -512,7 +560,8 @@ function printConsoleResults(suiteResults) {
     if (s.error) {
       console.log(`  ${C.red}Error: ${s.error}${C.reset}`);
     } else {
-      if (s.results.length === 0 && !hasJsErr) {
+      const hasToastErr = s.toastResults && s.toastResults.some(r => !r.pass);
+      if (s.results.length === 0 && !hasJsErr && !(s.toastResults && s.toastResults.length)) {
         console.log(`  ${C.dim}No recorded responses to compare${C.reset}`);
       } else {
         for (const r of s.results) {
@@ -525,6 +574,12 @@ function printConsoleResults(suiteResults) {
             for (const d of r.bodyDiffs.slice(0, 3))
               console.log(`    ${C.red}Body diff: ${d}${C.reset}`);
           }
+        }
+        for (const r of (s.toastResults ?? [])) {
+          if (r.pass)
+            console.log(`  ${C.green}✓${C.reset} ${C.dim}[Toast]${C.reset} ${r.text}`);
+          else
+            console.log(`  ${C.red}✗${C.reset} ${C.dim}[Toast]${C.reset} "${r.text}" — not seen in replay`);
         }
       }
       if (hasJsErr) {
@@ -608,6 +663,13 @@ function writeJunitReport(suiteResults, outPath) {
             lines.push(`      <failure message="${esc(msg)}" type="AssertionError">${esc(detail)}</failure>`);
           }
           lines.push('    </testcase>');
+        }
+        for (const r of (s.toastResults ?? [])) {
+          if (!r.pass) {
+            lines.push(`    <testcase name="[Toast] ${esc(r.text.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);
+            lines.push(`      <failure message="Toast not seen in replay: ${esc(r.text)}" type="ToastMismatch">${esc(r.text)}</failure>`);
+            lines.push('    </testcase>');
+          }
         }
         for (const e of (s.jsErrors ?? [])) {
           lines.push(`    <testcase name="[JS Error] ${esc(e.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);

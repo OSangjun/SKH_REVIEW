@@ -51,6 +51,7 @@ for (const col of [
   `ALTER TABLE recordings ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
   `ALTER TABLE recordings ADD COLUMN cookies     TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE recordings ADD COLUMN toasts      TEXT NOT NULL DEFAULT '[]'`,
 ]) { try { db.exec(col); } catch {} }
 
 db.exec(`
@@ -68,8 +69,8 @@ db.exec(`
 
 const stmts = {
   insertRecording: db.prepare(
-    `INSERT INTO recordings (name, url, event_count, created_at, events, responses, cookies)
-     VALUES (@name, @url, @event_count, @created_at, @events, @responses, @cookies)`
+    `INSERT INTO recordings (name, url, event_count, created_at, events, responses, cookies, toasts)
+     VALUES (@name, @url, @event_count, @created_at, @events, @responses, @cookies, @toasts)`
   ),
   updateMeta: db.prepare(
     `UPDATE recordings SET name=@name, description=@description, tags=@tags WHERE id=@id`
@@ -87,6 +88,7 @@ const stmts = {
   getEvents:     db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
   getResponses:  db.prepare(`SELECT responses FROM recordings WHERE id = ?`),
   getCookies:    db.prepare(`SELECT cookies   FROM recordings WHERE id = ?`),
+  getToasts:     db.prepare(`SELECT toasts    FROM recordings WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
   insertHistory: db.prepare(
     `INSERT INTO run_history (recording_id, run_at, passed, failed, total, results, duration_ms)
@@ -153,7 +155,7 @@ function dbLoadResponses(id) {
   if (!row) return [];
   return tryJson(row.responses, []);
 }
-function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies) {
+function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies, toasts) {
   const info = stmts.insertRecording.run({
     name, url,
     event_count: eventCount,
@@ -161,6 +163,7 @@ function dbSaveRecording(name, url, eventCount, createdAt, events, responses, co
     events:      JSON.stringify(events),
     responses:   JSON.stringify(responses),
     cookies:     JSON.stringify(cookies ?? []),
+    toasts:      JSON.stringify(toasts  ?? []),
   });
   return info.lastInsertRowid;
 }
@@ -168,6 +171,11 @@ function dbLoadCookies(id) {
   const row = stmts.getCookies.get(id);
   if (!row) return [];
   return tryJson(row.cookies, []);
+}
+function dbLoadToasts(id) {
+  const row = stmts.getToasts.get(id);
+  if (!row) return [];
+  return tryJson(row.toasts, []);
 }
 function dbUpdateMeta(id, name, description, tags) {
   stmts.updateMeta.run({ id, name, description, tags: JSON.stringify(tags) });
@@ -202,13 +210,16 @@ let activeWs      = null;   // connected frontend WebSocket
 
 let isRecording           = false;
 let capturedEvents        = [];
-let capturedResponses     = [];    // HTTP responses recorded during a session
-let pendingRespPromises   = new Set(); // in-flight body reads
+let capturedResponses     = [];
+let capturedToasts        = [];    // toast messages captured during recording
+let pendingRespPromises   = new Set();
 let recordingStartTime    = null;
 let currentUrl         = 'about:blank';
-let firstNavigateDone  = false; // suppress navigate event on very first load
-let sessionCookies     = [];    // cookies set by user via UI
-let replayCookies      = [];    // effective cookies for current replay (recording's saved cookies)
+let firstNavigateDone  = false;
+let sessionCookies     = [];
+let replayCookies      = [];
+let replayToasts       = [];    // toast messages captured during replay
+let replayToastActive  = false; // true only while runReplay is running
 
 // ─── Capture script (injected via evaluateOnNewDocument) ─────────────────────
 // This runs in EVERY page context regardless of how navigation happened
@@ -266,6 +277,34 @@ function buildCaptureScript() {
       if (e.target && e.target.tagName === 'SELECT')
         cap('select', { value: e.target.value });
     }, true);
+
+    // Toast / notification observer (role="alert" or role="status")
+    const _toastSeen = new WeakSet();
+    const _toastObs  = new MutationObserver(function(muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (node.nodeType !== 1) continue;
+          var els = (node.matches && node.matches('[role="alert"],[role="status"]'))
+            ? [node]
+            : (node.querySelectorAll
+                ? Array.prototype.slice.call(node.querySelectorAll('[role="alert"],[role="status"]'))
+                : []);
+          for (var k = 0; k < els.length; k++) {
+            var el = els[k];
+            if (_toastSeen.has(el)) continue;
+            _toastSeen.add(el);
+            var text = (el.innerText || el.textContent || '').trim();
+            if (text) cap('toast', { text: text });
+          }
+        }
+      }
+    });
+    (function startToastObs() {
+      if (document.body) _toastObs.observe(document.body, { childList: true, subtree: true });
+      else document.addEventListener('DOMContentLoaded', startToastObs);
+    })();
   })();`;
 }
 
@@ -293,10 +332,52 @@ async function launchSession() {
     if (!isRecording) return;
     const now = Date.now();
     if (recordingStartTime === null) recordingStartTime = now;
+    if (type === 'toast') {
+      capturedToasts.push({ text: data.text });
+      return;
+    }
     const ev = { type, ...data, t: now - recordingStartTime };
     capturedEvents.push(ev);
     send({ type: 'recording-event', count: capturedEvents.length });
   });
+
+  // Expose toast bridge for replay (separate from recording bridge)
+  await activePage.exposeFunction('__captureToast', text => {
+    if (replayToastActive) replayToasts.push(text);
+  });
+
+  // Inject toast observer for replay (runs on every page load, activated by replayToastActive flag)
+  await activePage.evaluateOnNewDocument(`(function() {
+    if (window.__CDP_TOAST_OBSERVER__) return;
+    window.__CDP_TOAST_OBSERVER__ = true;
+    var seen = new WeakSet();
+    var obs  = new MutationObserver(function(muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (node.nodeType !== 1) continue;
+          var els = (node.matches && node.matches('[role="alert"],[role="status"]'))
+            ? [node]
+            : (node.querySelectorAll
+                ? Array.prototype.slice.call(node.querySelectorAll('[role="alert"],[role="status"]'))
+                : []);
+          for (var k = 0; k < els.length; k++) {
+            var el = els[k];
+            if (seen.has(el)) continue;
+            seen.add(el);
+            var text = (el.innerText || el.textContent || '').trim();
+            if (text && window.__captureToast) window.__captureToast(text);
+          }
+        }
+      }
+    });
+    function start() {
+      if (document.body) obs.observe(document.body, { childList: true, subtree: true });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+    else start();
+  })();`);
 
   // Inject capture script on EVERY navigation (JS redirect, meta refresh, link, etc.)
   await activePage.evaluateOnNewDocument(buildCaptureScript());
@@ -483,6 +564,7 @@ async function handleClientMessage(msg, ws) {
       isRecording        = true;
       capturedEvents     = [];
       capturedResponses  = [];
+      capturedToasts     = [];
       pendingRespPromises = new Set();
       recordingStartTime = null;
       firstNavigateDone  = true;
@@ -512,6 +594,7 @@ async function handleClientMessage(msg, ws) {
         [...capturedEvents],
         [...capturedResponses],
         [...sessionCookies],
+        [...capturedToasts],
       );
       // Update name to reflect actual auto-increment id
       db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`)
@@ -531,7 +614,8 @@ async function handleClientMessage(msg, ws) {
       if (!events) break;
       const responses = dbLoadResponses(msg.id);
       const cookies   = dbLoadCookies(msg.id);
-      await runReplay(msg.id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, false, cookies);
+      const toasts    = dbLoadToasts(msg.id);
+      await runReplay(msg.id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, false, cookies, toasts);
       break;
     }
 
@@ -553,11 +637,12 @@ async function handleClientMessage(msg, ws) {
         if (!events)  { suiteFail++; continue; }
         const responses = dbLoadResponses(id);
         const cookies   = dbLoadCookies(id);
+        const toasts    = dbLoadToasts(id);
 
         ws.send(JSON.stringify({ type: 'suite-item-started', index: i, total: ids.length, name: meta.name }));
         log('info', `━━ [${i + 1}/${ids.length}] ${meta.name} ━━`);
 
-        const result = await runReplay(id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, true, cookies);
+        const result = await runReplay(id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, true, cookies, toasts);
 
         if (result.failed === 0) suitePass++;
         else suiteFail++;
@@ -703,7 +788,15 @@ function compareResponses(recorded, actual) {
   return results;
 }
 
-async function runReplay(recordingId, events, recordedResponses, startUrl, speedFactor, ws, isSuite = false, recordingCookies = []) {
+function compareToasts(recorded, actual) {
+  const actSet = new Set(actual.map(t => (typeof t === 'string' ? t : t.text).trim()));
+  return recorded.map(r => {
+    const text = (typeof r === 'string' ? r : r.text).trim();
+    return { text, pass: actSet.has(text) };
+  });
+}
+
+async function runReplay(recordingId, events, recordedResponses, startUrl, speedFactor, ws, isSuite = false, recordingCookies = [], recordingToasts = []) {
   const startMs = Date.now();
   if (!isSuite) ws.send(JSON.stringify({ type: 'replay-started' }));
   log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
@@ -712,6 +805,9 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   const replayRespPending  = new Set();
   const recMap             = buildResponseMap(recordedResponses);
   const jsErrors           = [];
+
+  replayToasts      = [];
+  replayToastActive = true;
 
   const onPageError = err => {
     jsErrors.push(err.message);
@@ -790,6 +886,7 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   } catch (err) {
     log('fail', `재생 오류: ${err.message}`);
   } finally {
+    replayToastActive = false;
     activePage.off('pageerror', onPageError);
     activePage.off('response', onResponse);
     // Wait for in-flight body reads
@@ -802,20 +899,21 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     ? compareResponses(recordedResponses, replayResponses)
     : [];
 
+  const toastResults = compareToasts(recordingToasts, replayToasts);
   const passed       = results.filter(r => r.pass).length;
   const httpFailed   = results.filter(r => !r.pass).length;
+  const toastFailed  = toastResults.filter(r => !r.pass).length;
   const scriptFailed = jsErrors.length;
-  const failed       = httpFailed + scriptFailed;
+  const failed       = httpFailed + toastFailed + scriptFailed;
 
   if (results.length > 0) {
     if (httpFailed === 0)
-      log('success', `━━ 결과: SUCCESS — ${passed}/${results.length} 응답 일치 ━━`);
+      log('success', `━━ HTTP 응답: SUCCESS — ${passed}/${results.length} 일치 ━━`);
     else if (passed === 0)
-      log('fail',    `━━ 결과: FAIL — ${httpFailed}/${results.length} 응답 불일치 ━━`);
+      log('fail',    `━━ HTTP 응답: FAIL — ${httpFailed}/${results.length} 불일치 ━━`);
     else
-      log('warn',    `━━ 결과: PARTIAL — 성공 ${passed} / 실패 ${httpFailed} ━━`);
+      log('warn',    `━━ HTTP 응답: PARTIAL — 성공 ${passed} / 실패 ${httpFailed} ━━`);
 
-    // Per-URL result log
     for (const r of results) {
       if (r.pass) {
         log('success', `  ✓ [${r.actualStatus}] ${r.url}`);
@@ -828,7 +926,18 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
       }
     }
   } else {
-    log('info', '━━ 재생 완료 (응답 비교 없음) ━━');
+    log('info', '━━ 재생 완료 (HTTP 응답 비교 없음) ━━');
+  }
+
+  if (toastResults.length > 0) {
+    if (toastFailed === 0)
+      log('success', `━━ 토스트: SUCCESS — ${toastResults.length}건 일치 ━━`);
+    else
+      log('fail',    `━━ 토스트: FAIL — ${toastFailed}/${toastResults.length}건 불일치 ━━`);
+    for (const r of toastResults) {
+      if (r.pass) log('success', `  ✓ [Toast] ${r.text}`);
+      else        log('fail',    `  ✗ [Toast] "${r.text}" — 재생 시 미감지`);
+    }
   }
 
   if (jsErrors.length > 0) {
@@ -838,12 +947,12 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   }
 
   const durationMs = Date.now() - startMs;
-  dbSaveHistory(recordingId, passed, failed, results.length, results, durationMs);
+  dbSaveHistory(recordingId, passed, failed, results.length + toastResults.length, results, durationMs);
   ws.send(JSON.stringify({ type: 'history', recordingId, runs: dbGetHistory(recordingId) }));
 
   if (!isSuite) ws.send(JSON.stringify({ type: 'replay-done' }));
-  ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length, jsErrors }));
-  return { passed, failed, total: results.length };
+  ws.send(JSON.stringify({ type: 'replay-result', results, toastResults, passed, failed, total: results.length + toastResults.length, jsErrors }));
+  return { passed, failed, total: results.length + toastResults.length };
 }
 
 const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
