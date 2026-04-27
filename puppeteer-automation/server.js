@@ -711,6 +711,13 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   const replayResponses    = [];
   const replayRespPending  = new Set();
   const recMap             = buildResponseMap(recordedResponses);
+  const jsErrors           = [];
+
+  const onPageError = err => {
+    jsErrors.push(err.message);
+    log('fail', `[JS Error] ${err.message}`);
+  };
+  activePage.on('pageerror', onPageError);
 
   const onResponse = response => {
     const url = response.url();
@@ -783,6 +790,7 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   } catch (err) {
     log('fail', `재생 오류: ${err.message}`);
   } finally {
+    activePage.off('pageerror', onPageError);
     activePage.off('response', onResponse);
     // Wait for in-flight body reads
     if (replayRespPending.size > 0)
@@ -794,24 +802,25 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     ? compareResponses(recordedResponses, replayResponses)
     : [];
 
-  const passed = results.filter(r => r.pass).length;
-  const failed = results.filter(r => !r.pass).length;
+  const passed       = results.filter(r => r.pass).length;
+  const httpFailed   = results.filter(r => !r.pass).length;
+  const scriptFailed = jsErrors.length;
+  const failed       = httpFailed + scriptFailed;
 
   if (results.length > 0) {
-    if (failed === 0)
+    if (httpFailed === 0)
       log('success', `━━ 결과: SUCCESS — ${passed}/${results.length} 응답 일치 ━━`);
     else if (passed === 0)
-      log('fail',    `━━ 결과: FAIL — ${failed}/${results.length} 응답 불일치 ━━`);
+      log('fail',    `━━ 결과: FAIL — ${httpFailed}/${results.length} 응답 불일치 ━━`);
     else
-      log('warn',    `━━ 결과: PARTIAL — 성공 ${passed} / 실패 ${failed} ━━`);
+      log('warn',    `━━ 결과: PARTIAL — 성공 ${passed} / 실패 ${httpFailed} ━━`);
 
     // Per-URL result log
     for (const r of results) {
-      const short = r.url.length > 80 ? r.url.slice(0, 77) + '…' : r.url;
       if (r.pass) {
-        log('success', `  ✓ [${r.actualStatus}] ${short}`);
+        log('success', `  ✓ [${r.actualStatus}] ${r.url}`);
       } else {
-        log('fail', `  ✗ [${r.actualStatus}] ${short}`);
+        log('fail', `  ✗ [${r.actualStatus}] ${r.url}`);
         if (!r.statusPass)
           log('fail', `    상태코드: ${r.expectedStatus} → ${r.actualStatus}`);
         for (const d of r.bodyDiffs.slice(0, 3))
@@ -822,12 +831,18 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     log('info', '━━ 재생 완료 (응답 비교 없음) ━━');
   }
 
+  if (jsErrors.length > 0) {
+    log('fail', `━━ 스크립트 에러 ${jsErrors.length}건 감지 ━━`);
+    for (const e of jsErrors)
+      log('fail', `  ✗ [JS Error] ${e}`);
+  }
+
   const durationMs = Date.now() - startMs;
   dbSaveHistory(recordingId, passed, failed, results.length, results, durationMs);
   ws.send(JSON.stringify({ type: 'history', recordingId, runs: dbGetHistory(recordingId) }));
 
   if (!isSuite) ws.send(JSON.stringify({ type: 'replay-done' }));
-  ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length }));
+  ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length, jsErrors }));
   return { passed, failed, total: results.length };
 }
 

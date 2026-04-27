@@ -410,7 +410,14 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
   await page.setViewport(VIEWPORT);
 
   const replayResponses = [];
-  const pending = new Set();
+  const pending   = new Set();
+  const jsErrors  = [];
+
+  const onPageError = err => {
+    jsErrors.push(err.message);
+    if (opts.verbose) console.log(`  ${C.red}[JS Error] ${err.message}${C.reset}`);
+  };
+  page.on('pageerror', onPageError);
 
   const onResponse = response => {
     const url = response.url();
@@ -469,18 +476,20 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
   } catch (err) {
     error = err.message;
   } finally {
+    page.off('pageerror', onPageError);
     page.off('response', onResponse);
     if (pending.size > 0)
       await Promise.race([Promise.allSettled([...pending]), sleep(2000)]);
     await page.close();
   }
 
-  const duration = (Date.now() - startMs) / 1000;
-  const results  = recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
-  const passed   = results.filter(r => r.pass).length;
-  const failed   = results.filter(r => !r.pass).length;
+  const duration     = (Date.now() - startMs) / 1000;
+  const results      = recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
+  const passed       = results.filter(r => r.pass).length;
+  const httpFailed   = results.filter(r => !r.pass).length;
+  const failed       = httpFailed + jsErrors.length;
 
-  return { rec, results, passed, failed, total: results.length, duration, error };
+  return { rec, results, passed, failed, total: results.length, duration, error, jsErrors };
 }
 
 // ── Output formatters ─────────────────────────────────────────────────────────
@@ -490,31 +499,37 @@ function printConsoleResults(suiteResults) {
   console.log();
 
   for (const s of suiteResults) {
+    const hasJsErr = s.jsErrors && s.jsErrors.length > 0;
     const statusLabel =
-      s.error                           ? `${C.red}✗ ERROR  ${C.reset}` :
-      s.total === 0                     ? `${C.yellow}~ SKIP   ${C.reset}` :
-      s.failed === 0                    ? `${C.green}✓ PASS   ${C.reset}` :
-                                          `${C.red}✗ FAIL   ${C.reset}`;
+      s.error                                    ? `${C.red}✗ ERROR  ${C.reset}` :
+      (s.total === 0 && !hasJsErr)               ? `${C.yellow}~ SKIP   ${C.reset}` :
+      (s.failed === 0 && !hasJsErr)              ? `${C.green}✓ PASS   ${C.reset}` :
+                                                   `${C.red}✗ FAIL   ${C.reset}`;
 
     const timeStr = `${C.dim}(${s.duration.toFixed(1)}s)${C.reset}`;
     console.log(`${C.bold}[${statusLabel}${C.bold}]${C.reset} ${C.bold}${s.rec.name}${C.reset} ${timeStr}`);
 
     if (s.error) {
       console.log(`  ${C.red}Error: ${s.error}${C.reset}`);
-    } else if (s.results.length === 0) {
-      console.log(`  ${C.dim}No recorded responses to compare${C.reset}`);
     } else {
-      for (const r of s.results) {
-        const short = r.url.length > 80 ? r.url.slice(0, 77) + '…' : r.url;
-        if (r.pass) {
-          console.log(`  ${C.green}✓${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${short}`);
-        } else {
-          console.log(`  ${C.red}✗${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${short}`);
-          if (!r.statusPass)
-            console.log(`    ${C.red}Status: expected ${r.expectedStatus}, got ${r.actualStatus}${C.reset}`);
-          for (const d of r.bodyDiffs.slice(0, 3))
-            console.log(`    ${C.red}Body diff: ${d}${C.reset}`);
+      if (s.results.length === 0 && !hasJsErr) {
+        console.log(`  ${C.dim}No recorded responses to compare${C.reset}`);
+      } else {
+        for (const r of s.results) {
+          if (r.pass) {
+            console.log(`  ${C.green}✓${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${r.url}`);
+          } else {
+            console.log(`  ${C.red}✗${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${r.url}`);
+            if (!r.statusPass)
+              console.log(`    ${C.red}Status: expected ${r.expectedStatus}, got ${r.actualStatus}${C.reset}`);
+            for (const d of r.bodyDiffs.slice(0, 3))
+              console.log(`    ${C.red}Body diff: ${d}${C.reset}`);
+          }
         }
+      }
+      if (hasJsErr) {
+        for (const e of s.jsErrors)
+          console.log(`  ${C.red}✗ [JS Error] ${e}${C.reset}`);
       }
       grandPassed += s.passed;
       grandFailed += s.failed;
@@ -560,7 +575,8 @@ function writeJunitReport(suiteResults, outPath) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  const totalTests    = suiteResults.reduce((a, s) => a + Math.max(s.total, 1), 0);
+  const jsCount       = s => (s.jsErrors ?? []).length;
+  const totalTests    = suiteResults.reduce((a, s) => a + Math.max(s.total + jsCount(s), 1), 0);
   const totalFailures = suiteResults.reduce((a, s) => a + (s.error ? 1 : s.failed), 0);
   const totalTime     = suiteResults.reduce((a, s) => a + s.duration, 0).toFixed(3);
 
@@ -570,7 +586,7 @@ function writeJunitReport(suiteResults, outPath) {
   ];
 
   for (const s of suiteResults) {
-    const suiteTests    = Math.max(s.total, 1);
+    const suiteTests    = Math.max(s.total + jsCount(s), 1);
     const suiteFailures = s.error ? 1 : s.failed;
     lines.push(`  <testsuite name="${esc(s.rec.name)}" tests="${suiteTests}" failures="${suiteFailures}" time="${s.duration.toFixed(3)}">`);
 
@@ -578,20 +594,26 @@ function writeJunitReport(suiteResults, outPath) {
       lines.push(`    <testcase name="${esc(s.rec.name)}" classname="${esc(s.rec.name)}" time="${s.duration.toFixed(3)}">`);
       lines.push(`      <failure message="${esc(s.error)}" type="Error">${esc(s.error)}</failure>`);
       lines.push(`    </testcase>`);
-    } else if (s.results.length === 0) {
-      lines.push(`    <testcase name="(no responses)" classname="${esc(s.rec.name)}" time="${s.duration.toFixed(3)}"/>`);
     } else {
-      for (const r of s.results) {
-        const name = r.url.length > 120 ? r.url.slice(0, 117) + '...' : r.url;
-        lines.push(`    <testcase name="${esc(name)}" classname="${esc(s.rec.name)}" time="0">`);
-        if (!r.pass) {
-          const msg = !r.statusPass
-            ? `Status: expected ${r.expectedStatus}, got ${r.actualStatus}`
-            : (r.bodyDiffs[0] ?? 'body mismatch');
-          const detail = r.bodyDiffs.join('\n');
-          lines.push(`      <failure message="${esc(msg)}" type="AssertionError">${esc(detail)}</failure>`);
+      if (s.results.length === 0 && !(s.jsErrors && s.jsErrors.length)) {
+        lines.push(`    <testcase name="(no responses)" classname="${esc(s.rec.name)}" time="${s.duration.toFixed(3)}"/>`);
+      } else {
+        for (const r of s.results) {
+          lines.push(`    <testcase name="${esc(r.url)}" classname="${esc(s.rec.name)}" time="0">`);
+          if (!r.pass) {
+            const msg = !r.statusPass
+              ? `Status: expected ${r.expectedStatus}, got ${r.actualStatus}`
+              : (r.bodyDiffs[0] ?? 'body mismatch');
+            const detail = r.bodyDiffs.join('\n');
+            lines.push(`      <failure message="${esc(msg)}" type="AssertionError">${esc(detail)}</failure>`);
+          }
+          lines.push('    </testcase>');
         }
-        lines.push('    </testcase>');
+        for (const e of (s.jsErrors ?? [])) {
+          lines.push(`    <testcase name="[JS Error] ${esc(e.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);
+          lines.push(`      <failure message="${esc(e)}" type="ScriptError">${esc(e)}</failure>`);
+          lines.push('    </testcase>');
+        }
       }
     }
     lines.push('  </testsuite>');
