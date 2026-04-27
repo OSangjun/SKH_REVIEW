@@ -69,6 +69,9 @@ function parseArgs() {
     cookieFile: null, // --cookie-file path
     verbose: false,
     fast: false, // CI mode: skip user think-time, shorten idle waits
+    ignoreHosts: [], // additional hosts excluded from response comparison
+    ignoreUrlPatterns: [], // additional URL regex patterns excluded
+    bodyIgnore: [], // additional JSON path regex patterns ignored in body diff
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -116,6 +119,15 @@ function parseArgs() {
       case "--fast":
         opts.fast = true;
         break;
+      case "--ignore-host":
+        opts.ignoreHosts.push(args[++i]);
+        break;
+      case "--ignore-url":
+        opts.ignoreUrlPatterns.push(new RegExp(args[++i]));
+        break;
+      case "--ignore-body":
+        opts.bodyIgnore.push(new RegExp(args[++i]));
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -160,6 +172,17 @@ ${C.bold}Replay options:${C.reset}
                            domcontentloaded for navigations, idleTime 200ms.
                            Use this in CI/CD pipelines.
   --timeout <ms>           Network idle timeout in ms (default: 5000)
+
+${C.bold}Comparison filters (in addition to built-in defaults):${C.reset}
+  --ignore-host <host>     Exclude responses to this host from comparison.
+                           Built-in: google-analytics, gtm, doubleclick, fb,
+                           hotjar, segment, mixpanel, amplitude, sentry, etc.
+  --ignore-url <regex>     Exclude responses matching this URL regex.
+                           Built-in: anti-bot uniqueness probes, cache-bust
+                           query params (?_t=, ?nonce=, ...).
+  --ignore-body <regex>    Skip JSON body paths matching this regex during
+                           diff. Built-in: CurrentTime, sessionId, csrfToken,
+                           nonce, traceId, ETag, etc. (case-insensitive).
   --base-url <url>         Replace origin of all URLs (for environment switching)
                            e.g. --base-url https://staging.example.com
 
@@ -461,6 +484,68 @@ function isApiResponse(response) {
   return t === "xhr" || t === "fetch";
 }
 
+// Built-in blocklist: third-party trackers + common anti-bot/CDN endpoints.
+// Responses to these hosts are excluded from comparison (still captured for
+// reference). Match is "host ends with" — covers subdomains.
+const DEFAULT_HOST_BLOCKLIST = [
+  "google-analytics.com",
+  "googletagmanager.com",
+  "doubleclick.net",
+  "googlesyndication.com",
+  "facebook.com",
+  "facebook.net",
+  "connect.facebook.net",
+  "hotjar.com",
+  "segment.com",
+  "segment.io",
+  "mixpanel.com",
+  "amplitude.com",
+  "branch.io",
+  "fullstory.com",
+  "tealium.com",
+  "tealiumiq.com",
+  "newrelic.com",
+  "nr-data.net",
+  "sentry.io",
+  "datadoghq.com",
+  "cloudflare.com",
+  "cloudflareinsights.com",
+];
+
+// URL patterns that always vary (anti-bot challenges, fingerprinting probes).
+// Match is regex on the full URL.
+const DEFAULT_URL_BLOCKLIST = [
+  /\/uniqueness\.[^/]+\/.+/,           // anti-bot fingerprinting
+  /[?&](nonce|_t|_=|_ts|cb)=\d+/,      // common cache-busters
+];
+
+// JSON body paths to ignore when diffing — matched against the slash-joined
+// path from jsonDiff (e.g. "root.CurrentTime"). Catches the most common
+// volatile fields that always differ between recording and replay.
+const DEFAULT_BODY_IGNORE = [
+  /\.(CurrentTime|currentTime|timestamp|requestId|requestTime|sessionId|UserSessionId|csrfToken|csrf|nonce|traceId|spanId|correlationId|ETag)$/i,
+];
+
+function isBlockedUrl(url, extraHosts = [], extraUrlPatterns = []) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  const host = parsed.host;
+  for (const h of [...DEFAULT_HOST_BLOCKLIST, ...extraHosts]) {
+    if (host === h || host.endsWith("." + h)) return true;
+  }
+  for (const re of [...DEFAULT_URL_BLOCKLIST, ...extraUrlPatterns]) {
+    if (re.test(url)) return true;
+  }
+  return false;
+}
+
+function isIgnoredBodyPath(path, extraPatterns = []) {
+  for (const re of [...DEFAULT_BODY_IGNORE, ...extraPatterns]) {
+    if (re.test(path)) return true;
+  }
+  return false;
+}
+
 // Page-key for URL grouping: origin + pathname (ignore query / hash)
 function pageKey(url) {
   if (!url) return "";
@@ -497,7 +582,8 @@ function buildResponseMap(responses) {
 }
 
 const MAX_DIFFS = 10;
-function jsonDiff(expected, actual, path = "root") {
+function jsonDiff(expected, actual, path = "root", bodyIgnore = []) {
+  if (isIgnoredBodyPath(path, bodyIgnore)) return [];
   if (typeof expected !== typeof actual)
     return [`${path}: type changed (${typeof expected} → ${typeof actual})`];
   if (expected === null || actual === null)
@@ -509,7 +595,7 @@ function jsonDiff(expected, actual, path = "root") {
         `${path}[]: length changed (${expected.length} → ${actual.length})`,
       );
     for (let i = 0; i < Math.min(expected.length, actual.length); i++) {
-      diffs.push(...jsonDiff(expected[i], actual[i], `${path}[${i}]`));
+      diffs.push(...jsonDiff(expected[i], actual[i], `${path}[${i}]`, bodyIgnore));
       if (diffs.length >= MAX_DIFFS) break;
     }
     return diffs.slice(0, MAX_DIFFS);
@@ -518,15 +604,17 @@ function jsonDiff(expected, actual, path = "root") {
     const diffs = [];
     const keys = new Set([...Object.keys(expected), ...Object.keys(actual)]);
     for (const k of keys) {
+      const childPath = `${path}.${k}`;
+      if (isIgnoredBodyPath(childPath, bodyIgnore)) continue;
       if (!(k in expected)) {
-        diffs.push(`${path}.${k}: key added`);
+        diffs.push(`${childPath}: key added`);
         continue;
       }
       if (!(k in actual)) {
-        diffs.push(`${path}.${k}: key removed`);
+        diffs.push(`${childPath}: key removed`);
         continue;
       }
-      diffs.push(...jsonDiff(expected[k], actual[k], `${path}.${k}`));
+      diffs.push(...jsonDiff(expected[k], actual[k], childPath, bodyIgnore));
       if (diffs.length >= MAX_DIFFS) break;
     }
     return diffs.slice(0, MAX_DIFFS);
@@ -536,15 +624,21 @@ function jsonDiff(expected, actual, path = "root") {
     : [];
 }
 
-function compareResponses(recorded, actual) {
+function compareResponses(recorded, actual, opts = {}) {
+  const ignoreHosts = opts.ignoreHosts ?? [];
+  const ignoreUrlPatterns = opts.ignoreUrlPatterns ?? [];
+  const bodyIgnore = opts.bodyIgnore ?? [];
+
   const recMap = buildResponseMap(recorded);
   const actMap = buildResponseMap(actual);
 
   const results = [];
   // Iterate over recorded URLs — pair each occurrence positionally with the
   // actual responses for the same full URL. Missing actuals are reported as
-  // failures; extras (not in recording) are ignored.
+  // failures; extras (not in recording) are ignored. URLs that match the
+  // host/url blocklist are skipped (third-party trackers, anti-bot probes).
   for (const [url, recList] of recMap) {
+    if (isBlockedUrl(url, ignoreHosts, ignoreUrlPatterns)) continue;
     const actList = actMap.get(url) ?? [];
     for (let i = 0; i < recList.length; i++) {
       const rec = recList[i];
@@ -572,7 +666,7 @@ function compareResponses(recorded, actual) {
           bodyDiffs = ["body capture failed (no response body in replay)"];
         } else {
           try {
-            bodyDiffs = jsonDiff(JSON.parse(rec.body), JSON.parse(act.body));
+            bodyDiffs = jsonDiff(JSON.parse(rec.body), JSON.parse(act.body), "root", bodyIgnore);
             bodyPass = bodyDiffs.length === 0;
           } catch {
             bodyPass = rec.body === act.body;
@@ -924,8 +1018,13 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   }
 
   const duration = (Date.now() - startMs) / 1000;
+  const compareOpts = {
+    ignoreHosts: opts.ignoreHosts,
+    ignoreUrlPatterns: opts.ignoreUrlPatterns,
+    bodyIgnore: opts.bodyIgnore,
+  };
   const results =
-    recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
+    recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : [];
   const toastResults = compareToasts(recordedToasts, replayToasts);
   const triggerResults = compareTriggerMappings(events, replayTriggerMap);
   const passed = results.filter((r) => r.pass).length;
