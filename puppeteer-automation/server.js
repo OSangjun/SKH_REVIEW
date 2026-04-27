@@ -233,11 +233,6 @@ function buildCaptureScript() {
     document.addEventListener('dblclick', e => {
       cap('dblclick', { x: e.clientX, y: e.clientY });
     }, true);
-    document.addEventListener('mousedown',
-      e => cap('mousedown', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
-    document.addEventListener('mouseup',
-      e => cap('mouseup',   { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
-
     document.addEventListener('wheel',
       e => cap('wheel', { x: e.clientX, y: e.clientY, deltaX: e.deltaX, deltaY: e.deltaY }),
       { capture: true, passive: true });
@@ -851,14 +846,6 @@ async function dispatchReplayEvent(ev) {
       case 'dblclick':
         await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;
-      case 'mousedown':
-        await activePage.mouse.move(ev.x, ev.y);
-        await activePage.mouse.down({ button: BTN(ev.button) });
-        break;
-      case 'mouseup':
-        await activePage.mouse.move(ev.x, ev.y);
-        await activePage.mouse.up({ button: BTN(ev.button) });
-        break;
       case 'wheel':
         await activePage.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
         break;
@@ -942,7 +929,6 @@ function generateScript(rec) {
       case 'navigate':    lines.push(`  await page.goto(${JSON.stringify(ev.url)}, { waitUntil: 'domcontentloaded' });`); break;
       case 'click':       lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { button: ${BTN(ev.button)} });`); break;
       case 'dblclick':    lines.push(`  await page.mouse.click(${ev.x}, ${ev.y}, { clickCount: 2 });`); break;
-      case 'mousemove':   lines.push(`  await page.mouse.move(${ev.x}, ${ev.y});`); break;
       case 'wheel':       lines.push(`  await page.mouse.wheel({ deltaX: ${ev.deltaX}, deltaY: ${ev.deltaY} });`); break;
       case 'scroll':      lines.push(`  await page.evaluate(() => window.scrollTo(${ev.scrollX}, ${ev.scrollY}));`); break;
       case 'keydown':     lines.push(`  await page.keyboard.down(${JSON.stringify(ev.key)});`); break;

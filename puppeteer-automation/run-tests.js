@@ -364,14 +364,6 @@ async function dispatchEvent(page, ev, baseUrl) {
     case 'dblclick':
       await page.mouse.click(ev.x, ev.y, { clickCount: 2 });
       break;
-    case 'mousedown':
-      await page.mouse.move(ev.x, ev.y);
-      await page.mouse.down({ button: BTN(ev.button) });
-      break;
-    case 'mouseup':
-      await page.mouse.move(ev.x, ev.y);
-      await page.mouse.up({ button: BTN(ev.button) });
-      break;
     case 'wheel':
       await page.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
       break;
