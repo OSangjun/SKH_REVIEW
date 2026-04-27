@@ -72,6 +72,7 @@ function parseArgs() {
     ignoreHosts: [], // additional hosts excluded from response comparison
     ignoreUrlPatterns: [], // additional URL regex patterns excluded
     bodyIgnore: [], // additional JSON path regex patterns ignored in body diff
+    stripParams: [], // additional query param names to strip when comparing URLs
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -128,6 +129,9 @@ function parseArgs() {
       case "--ignore-body":
         opts.bodyIgnore.push(new RegExp(args[++i]));
         break;
+      case "--strip-param":
+        opts.stripParams.push(args[++i]);
+        break;
       case "--help":
       case "-h":
         printHelp();
@@ -183,6 +187,10 @@ ${C.bold}Comparison filters (in addition to built-in defaults):${C.reset}
   --ignore-body <regex>    Skip JSON body paths matching this regex during
                            diff. Built-in: CurrentTime, sessionId, csrfToken,
                            nonce, traceId, ETag, etc. (case-insensitive).
+  --strip-param <name>     Strip this query param from URLs before matching.
+                           Built-in: _ _t _ts nonce cb cachebust timestamp.
+                           Use for site-specific tokens like
+                           --strip-param netfunnelKeyString.
   --base-url <url>         Replace origin of all URLs (for environment switching)
                            e.g. --base-url https://staging.example.com
 
@@ -516,8 +524,34 @@ const DEFAULT_HOST_BLOCKLIST = [
 // Match is regex on the full URL.
 const DEFAULT_URL_BLOCKLIST = [
   /\/uniqueness\.[^/]+\/.+/,           // anti-bot fingerprinting
-  /[?&](nonce|_t|_=|_ts|cb)=\d+/,      // common cache-busters
 ];
+
+// Query parameter names to strip when canonicalizing URLs for comparison.
+// These are cache-busters / timestamps / nonces that vary every request but
+// don't change which endpoint is being called.
+const CACHE_BUST_PARAMS = new Set([
+  "_", "_t", "_ts", "_=", "nonce", "cb", "cachebust", "timestamp", "v", "version",
+]);
+
+// Canonicalize a URL for comparison: strip query params that are pure
+// cache-busters/nonces so the same logical endpoint matches between
+// recording and replay. Extra param names (per-project tokens like
+// `netfunnelKeyString`, `csrfToken`, `xsrf`) can be added via `extraStrip`.
+function canonicalUrl(url, extraStrip = []) {
+  try {
+    const u = new URL(url);
+    const strip = new Set([...CACHE_BUST_PARAMS, ...extraStrip]);
+    const keep = [];
+    u.searchParams.forEach((value, key) => {
+      if (!strip.has(key)) keep.push([key, value]);
+    });
+    u.search = "";
+    for (const [k, v] of keep) u.searchParams.append(k, v);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 // JSON body paths to ignore when diffing — matched against the slash-joined
 // path from jsonDiff (e.g. "root.CurrentTime"). Catches the most common
@@ -569,12 +603,13 @@ function groupByPage(rows) {
   return groups;
 }
 
-// Group responses by full URL (query string included). Same URL called N times
-// in a row keeps N entries so positional pairing can compare each occurrence.
-function buildResponseMap(responses) {
+// Group responses by canonicalized URL (cache-buster params stripped, full
+// query otherwise). Same URL called N times in a row keeps N entries so
+// positional pairing can compare each occurrence.
+function buildResponseMap(responses, stripParams = []) {
   const map = new Map();
   for (const r of responses) {
-    const key = r.url;
+    const key = canonicalUrl(r.url, stripParams);
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(r);
   }
@@ -628,9 +663,10 @@ function compareResponses(recorded, actual, opts = {}) {
   const ignoreHosts = opts.ignoreHosts ?? [];
   const ignoreUrlPatterns = opts.ignoreUrlPatterns ?? [];
   const bodyIgnore = opts.bodyIgnore ?? [];
+  const stripParams = opts.stripParams ?? [];
 
-  const recMap = buildResponseMap(recorded);
-  const actMap = buildResponseMap(actual);
+  const recMap = buildResponseMap(recorded, stripParams);
+  const actMap = buildResponseMap(actual, stripParams);
 
   const results = [];
   // Iterate over recorded URLs — pair each occurrence positionally with the
@@ -1022,6 +1058,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     ignoreHosts: opts.ignoreHosts,
     ignoreUrlPatterns: opts.ignoreUrlPatterns,
     bodyIgnore: opts.bodyIgnore,
+    stripParams: opts.stripParams,
   };
   const results =
     recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : [];
