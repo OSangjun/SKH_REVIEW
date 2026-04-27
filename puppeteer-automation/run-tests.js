@@ -955,8 +955,7 @@ function printConsoleResults(suiteResults) {
   let grandPassed = 0,
     grandFailed = 0;
   let grandRecPass = 0,
-    grandRecFail = 0,
-    grandRecSkip = 0;
+    grandRecFail = 0;
   console.log();
 
   // Group suite results by page URL so the detailed report is URL-segmented
@@ -973,25 +972,23 @@ function printConsoleResults(suiteResults) {
         `${C.dim}(${groupResults.length} recording${groupResults.length === 1 ? "" : "s"})${C.reset}`,
     );
     let pgPass = 0,
-      pgFail = 0,
-      pgSkip = 0;
+      pgFail = 0;
 
   for (const s of groupResults) {
     const hasJsErr = s.jsErrors && s.jsErrors.length > 0;
     const isErr = !!s.error;
-    const isSkip = !isErr && s.total === 0 && !hasJsErr;
-    const isPass = !isErr && !isSkip && s.failed === 0 && !hasJsErr;
+    const isPass = !isErr && s.failed === 0 && !hasJsErr;
     if (isPass) { pgPass++; grandRecPass++; }
-    else if (isSkip) { pgSkip++; grandRecSkip++; }
     else { pgFail++; grandRecFail++; }
 
+    const noChecks = !isErr && s.total === 0 && !hasJsErr;
     const statusLabel = s.error
       ? `${C.red}✗ ERROR  ${C.reset}`
-      : s.total === 0 && !hasJsErr
-        ? `${C.yellow}~ SKIP   ${C.reset}`
-        : s.failed === 0 && !hasJsErr
-          ? `${C.green}✓ PASS   ${C.reset}`
-          : `${C.red}✗ FAIL   ${C.reset}`;
+      : s.failed === 0 && !hasJsErr
+        ? (noChecks
+            ? `${C.green}✓ PASS*  ${C.reset}` // PASS with no checks
+            : `${C.green}✓ PASS   ${C.reset}`)
+        : `${C.red}✗ FAIL   ${C.reset}`;
 
     const timeStr = `${C.dim}(${s.duration.toFixed(1)}s)${C.reset}`;
     console.log(
@@ -1056,11 +1053,10 @@ function printConsoleResults(suiteResults) {
     }
   }
 
-    const skipNote = pgSkip > 0 ? `, ${C.yellow}${pgSkip} skipped${C.reset}` : "";
     console.log(
       `  ${C.dim}└─ Page result:${C.reset} ` +
         `${C.green}${pgPass} passed${C.reset}, ` +
-        `${C.red}${pgFail} failed${C.reset}${skipNote}`,
+        `${C.red}${pgFail} failed${C.reset}`,
     );
     console.log();
   }
@@ -1068,12 +1064,10 @@ function printConsoleResults(suiteResults) {
   const overallOk = grandRecFail === 0;
   const icon = overallOk ? `${C.green}✓${C.reset}` : `${C.red}✗${C.reset}`;
   const totalRec = suiteResults.length;
-  const skipTotal =
-    grandRecSkip > 0 ? `, ${C.yellow}${grandRecSkip} skipped${C.reset}` : "";
   console.log(
     `${C.bold}${icon} Total:${C.reset}  ` +
       `${C.green}${grandRecPass} passed${C.reset}, ` +
-      `${C.red}${grandRecFail} failed${C.reset}${skipTotal}  ` +
+      `${C.red}${grandRecFail} failed${C.reset}  ` +
       `${C.dim}(${totalRec} test case${totalRec === 1 ? "" : "s"} — ` +
       `${grandPassed}/${grandPassed + grandFailed} checks)${C.reset}`,
   );
@@ -1308,8 +1302,7 @@ async function main() {
       );
 
       let groupPass = 0,
-        groupFail = 0,
-        groupSkip = 0;
+        groupFail = 0;
 
       for (const rec of groupRows) {
         i++;
@@ -1326,15 +1319,11 @@ async function main() {
             `${C.red}ERROR${C.reset} ${C.dim}(${result.duration.toFixed(1)}s)${C.reset}`,
           );
           console.log(`  ${C.dim}${result.error}${C.reset}`);
-        } else if (result.total === 0) {
-          groupSkip++;
-          console.log(
-            `${C.yellow}SKIP${C.reset} ${C.dim}(no responses, ${result.duration.toFixed(1)}s)${C.reset}`,
-          );
         } else if (result.failed === 0) {
           groupPass++;
+          const note = result.total === 0 ? "no checks" : `${result.passed}/${result.total}`;
           console.log(
-            `${C.green}PASS${C.reset} ${C.dim}${result.passed}/${result.total} (${result.duration.toFixed(1)}s)${C.reset}`,
+            `${C.green}PASS${C.reset} ${C.dim}${note} (${result.duration.toFixed(1)}s)${C.reset}`,
           );
         } else {
           groupFail++;
@@ -1344,11 +1333,10 @@ async function main() {
         }
       }
 
-      const skipNote = groupSkip > 0 ? `, ${C.yellow}${groupSkip} skipped${C.reset}` : "";
       console.log(
         `  ${C.dim}└─ Page result:${C.reset} ` +
           `${C.green}${groupPass} passed${C.reset}, ` +
-          `${C.red}${groupFail} failed${C.reset}${skipNote}`,
+          `${C.red}${groupFail} failed${C.reset}`,
       );
     }
   } finally {

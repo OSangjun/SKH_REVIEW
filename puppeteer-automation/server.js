@@ -285,7 +285,9 @@ function buildCaptureScript() {
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
-    // Build a stable CSS selector for form/interactive elements
+    // Build a stable CSS selector for form/interactive elements.
+    // Falls back to a class-based selector for buttons/links — combined with
+    // the recorded label, replay can disambiguate same-class siblings.
     function getSelector(el) {
       if (!el || !el.tagName) return null;
       var tag = el.tagName.toLowerCase();
@@ -303,10 +305,20 @@ function buildCaptureScript() {
           : tag + '[type=' + JSON.stringify(el.type) + ']';
       if (tag === 'input' && el.placeholder)
         return tag + '[placeholder=' + JSON.stringify(el.placeholder) + ']';
+      // Class-based fallback for buttons/links (paired with label at replay)
+      if (tag === 'a' && el.getAttribute && el.getAttribute('href'))
+        return tag + '[href=' + JSON.stringify(el.getAttribute('href')) + ']';
+      if (el.className && typeof el.className === 'string') {
+        var cls = el.className.trim().split(/\s+/).filter(function(c) {
+          return c && !/^(active|selected|focus|hover|disabled)$/.test(c);
+        });
+        if (cls.length > 0) return tag + '.' + cls.join('.');
+      }
       return null;
     }
 
-    // Get visible label text for an element
+    // Get visible label text for an element. Falls back to innerText for
+    // buttons/links so class-based selectors can be disambiguated by label.
     function getLabel(el) {
       if (!el) return null;
       var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
@@ -321,6 +333,11 @@ function buildCaptureScript() {
         if (lEl) return (lEl.innerText || lEl.textContent || '').trim() || null;
       }
       if (el.placeholder) return el.placeholder;
+      var tag = el.tagName && el.tagName.toLowerCase();
+      if (tag === 'button' || tag === 'a' || tag === 'label') {
+        var txt = (el.innerText || el.textContent || '').trim();
+        if (txt) return txt.length > 80 ? txt.slice(0, 80) : txt;
+      }
       return null;
     }
 
@@ -903,6 +920,20 @@ async function handleClientMessage(msg, ws) {
 
 // ─── Replay engine ────────────────────────────────────────────────────────────
 
+// Pick the element matching `selector` whose visible text equals `label`,
+// falling back to the first match if none does. Disambiguates class-only
+// selectors that match many same-class siblings.
+async function pickByLabelOrFirst(page, selector, label) {
+  const handles = await page.$$(selector);
+  if (handles.length === 0) return null;
+  if (handles.length === 1 || !label) return handles[0];
+  for (const h of handles) {
+    const txt = await h.evaluate((e) => (e.innerText || "").trim());
+    if (txt === label) return h;
+  }
+  return handles[0];
+}
+
 // Wait until network goes idle (≤2 concurrent requests for idleTime ms).
 // Silently absorbs timeout — some pages keep persistent connections.
 // Fast-mode default: 200ms idle is enough for typical localhost/API responses.
@@ -1397,7 +1428,7 @@ async function dispatchReplayEvent(ev) {
       case "click":
         if (ev.selector) {
           try {
-            const el = await activePage.$(ev.selector);
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
             if (el) {
               await el.click();
               break;
@@ -1418,7 +1449,7 @@ async function dispatchReplayEvent(ev) {
       case "dblclick":
         if (ev.selector) {
           try {
-            const el = await activePage.$(ev.selector);
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
             if (el) {
               await el.click({ clickCount: 2 });
               break;
