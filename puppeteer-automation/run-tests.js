@@ -508,11 +508,13 @@ function isApiResponse(response) {
 }
 
 // Built-in blocklist: third-party trackers + common anti-bot/CDN endpoints.
-// Responses to these hosts are excluded from comparison (still captured for
-// reference). Match is "host ends with" — covers subdomains.
+// Responses to these hosts are skipped during BOTH capture and comparison —
+// volatile by nature, never useful for regression testing.
+// Match is "host ends with" — covers subdomains (e.g. analytics.googleapis.com).
 const DEFAULT_HOST_BLOCKLIST = [
   "google-analytics.com",
   "googletagmanager.com",
+  "googleapis.com",          // covers analytics.googleapis.com, fonts.*, etc.
   "doubleclick.net",
   "googlesyndication.com",
   "facebook.com",
@@ -1251,6 +1253,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     const url = response.url();
     if (url.startsWith("data:") || url.startsWith("blob:")) return;
     if (!isApiResponse(response)) return;
+    if (isBlockedUrl(url, opts.ignoreHosts, opts.ignoreUrlPatterns)) return;
     replayResponseUrls.push(url); // synchronous — used for trigger mapping
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();

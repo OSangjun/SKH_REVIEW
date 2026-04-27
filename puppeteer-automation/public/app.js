@@ -126,17 +126,17 @@
         recordBtn.innerHTML = '<span class="dot"></span> 중지';
         recBadge.classList.remove('hidden');
         replayBtn.disabled = true;
-        setStatus('녹화 중… 브라우저에서 자유롭게 상호작용하세요.');
+        setStatus('기록 중… 브라우저에서 자유롭게 상호작용하세요.');
         break;
 
       case 'recording-event':
-        setStatus(`녹화 중… ${msg.count}개 이벤트 캡처됨`);
+        setStatus(`기록 중… ${msg.count}개 이벤트 캡처됨`);
         break;
 
       case 'recording-saved':
         isRecording = false;
         recordBtn.classList.remove('active');
-        recordBtn.innerHTML = '<span class="dot"></span> 녹화';
+        recordBtn.innerHTML = '<span class="dot"></span> 기록';
         recBadge.classList.add('hidden');
         setStatus(`저장 완료 — ${msg.recording.name} (${msg.recording.eventCount}개 이벤트)`);
         break;
@@ -144,9 +144,9 @@
       case 'recording-empty':
         isRecording = false;
         recordBtn.classList.remove('active');
-        recordBtn.innerHTML = '<span class="dot"></span> 녹화';
+        recordBtn.innerHTML = '<span class="dot"></span> 기록';
         recBadge.classList.add('hidden');
-        setStatus('녹화된 이벤트가 없습니다.');
+        setStatus('기록된 이벤트가 없습니다.');
         break;
 
       case 'recordings': {
@@ -429,7 +429,7 @@
   // ── Delete ────────────────────────────────────────────────────────────────────
   function deleteRecording(id) {
     send({ type: 'delete-recording', id });
-    setStatus('녹화 삭제됨.');
+    setStatus('테스트 케이스 삭제됨.');
   }
 
   // ── Suite button ──────────────────────────────────────────────────────────────
@@ -440,11 +440,11 @@
     suiteBtn.textContent = checkedIds.size > 0
       ? `⚡ 스위트 (${checkedIds.size})`
       : '⚡ 스위트';
-    suiteBtn.title = empty  ? '녹화가 없습니다'
+    suiteBtn.title = empty  ? '테스트 케이스가 없습니다'
       : suiteMode           ? '스위트 실행 중'
       : isReplaying         ? '재생 중 — 완료 후 사용 가능'
-      : checkedIds.size > 0 ? `선택된 ${checkedIds.size}개 녹화를 순서대로 실행`
-      :                       '모든 녹화를 순서대로 일괄 실행';
+      : checkedIds.size > 0 ? `선택된 ${checkedIds.size}개 테스트 케이스를 순서대로 실행`
+      :                       '모든 테스트 케이스를 순서대로 일괄 실행';
   }
 
   suiteBtn.addEventListener('click', () => {
@@ -496,11 +496,11 @@
     recCount.textContent = `${visible.length}개`;
 
     if (recordings.length === 0) {
-      recList.innerHTML = '<p class="empty-msg">아직 녹화가 없습니다.</p>';
+      recList.innerHTML = '<p class="empty-msg">아직 테스트 케이스가 없습니다.</p>';
       return;
     }
     if (visible.length === 0) {
-      recList.innerHTML = '<p class="empty-msg">현재 페이지에 해당하는 녹화가 없습니다.</p>';
+      recList.innerHTML = '<p class="empty-msg">현재 페이지에 해당하는 테스트 케이스가 없습니다.</p>';
       return;
     }
 
@@ -821,7 +821,7 @@
   function renderRespList() {
     respCountLabel.textContent = `${respItems.length}개 항목`;
     if (respItems.length === 0) {
-      respList.innerHTML = '<p class="empty-msg" style="padding:12px">녹화된 HTTP 응답이 없습니다.</p>';
+      respList.innerHTML = '<p class="empty-msg" style="padding:12px">기록된 HTTP 응답이 없습니다.</p>';
       return;
     }
     respList.innerHTML = '';

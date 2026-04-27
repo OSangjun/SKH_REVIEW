@@ -447,6 +447,45 @@ function isApiResponse(response) {
   return t === "xhr" || t === "fetch";
 }
 
+// Third-party tracker / CDN-noise hosts. Skipped during both recording and
+// replay — these endpoints vary every request and are not the system under
+// test. Match is "host ends with" — covers subdomains.
+const TRACKER_HOSTS = [
+  "google-analytics.com",
+  "googletagmanager.com",
+  "googleapis.com",
+  "doubleclick.net",
+  "googlesyndication.com",
+  "facebook.com",
+  "facebook.net",
+  "connect.facebook.net",
+  "hotjar.com",
+  "segment.com",
+  "segment.io",
+  "mixpanel.com",
+  "amplitude.com",
+  "branch.io",
+  "fullstory.com",
+  "tealium.com",
+  "tealiumiq.com",
+  "newrelic.com",
+  "nr-data.net",
+  "sentry.io",
+  "datadoghq.com",
+  "cloudflare.com",
+  "cloudflareinsights.com",
+];
+
+function isTrackerUrl(url) {
+  try {
+    const host = new URL(url).host;
+    for (const h of TRACKER_HOSTS) {
+      if (host === h || host.endsWith("." + h)) return true;
+    }
+  } catch {}
+  return false;
+}
+
 async function launchSession() {
   console.log("[Browser] Launching Puppeteer …");
   browser = await puppeteer.launch({
@@ -539,6 +578,7 @@ async function launchSession() {
     const url = response.url();
     if (url.startsWith("data:") || url.startsWith("blob:")) return;
     if (!isApiResponse(response)) return;
+    if (isTrackerUrl(url)) return;
 
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const wantBody = /json|text\/plain|xml/.test(ct);
@@ -762,7 +802,7 @@ async function handleClientMessage(msg, ws) {
 
       const createdAt = new Date().toISOString();
       const newId = dbSaveRecording(
-        `녹화 #?`,
+        `테스트 케이스 #?`,
         recordingStartUrl || currentUrl,
         capturedEvents.length,
         createdAt,
@@ -773,7 +813,7 @@ async function handleClientMessage(msg, ws) {
       );
       // Update name to reflect actual auto-increment id
       db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`).run(
-        `녹화 #${newId}`,
+        `테스트 케이스 #${newId}`,
         newId,
       );
       const meta = dbGetMeta(newId);
@@ -1221,6 +1261,7 @@ async function runReplay(
     const url = response.url();
     if (url.startsWith("data:") || url.startsWith("blob:")) return;
     if (!isApiResponse(response)) return;
+    if (isTrackerUrl(url)) return;
     replayResponseUrls.push(url); // synchronous — used for trigger mapping
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();
@@ -1254,7 +1295,7 @@ async function runReplay(
       await activePage.setCookie(...replayCookies);
       log(
         "info",
-        `쿠키 ${replayCookies.length}개 적용${recordingCookies.length > 0 ? " (녹화 저장 쿠키)" : ""}`,
+        `쿠키 ${replayCookies.length}개 적용${recordingCookies.length > 0 ? " (테스트 케이스 저장 쿠키)" : ""}`,
       );
     }
 
