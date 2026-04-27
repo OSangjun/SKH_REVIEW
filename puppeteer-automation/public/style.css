@@ -192,12 +192,38 @@ html, body {
 .canvas-wrap {
   flex: 1;
   min-height: 0;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   background: #1a1a1a;
   overflow: hidden;
 }
+
+/* ── Replay result badge (top-right of canvas area) ─────────────────────── */
+.result-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0,0,0,.75);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  transition: opacity .3s;
+  pointer-events: none;
+}
+.result-badge.hidden { display: none; }
+.result-badge.pass   { border-color: var(--replay-color); color: var(--replay-color); }
+.result-badge.fail   { border-color: var(--rec-color);    color: var(--rec-color);    }
+.result-badge.mixed  { border-color: #f59e0b;             color: #f59e0b;             }
+.result-badge .rb-icon { font-size: 16px; }
 
 #browser-canvas {
   display: block;

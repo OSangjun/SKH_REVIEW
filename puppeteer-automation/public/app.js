@@ -18,6 +18,7 @@
   const ovName        = document.getElementById('ov-name');
   const ovBar         = document.getElementById('ov-bar');
   const ovProgress    = document.getElementById('ov-progress');
+  const resultBadge   = document.getElementById('result-badge');
   const cookieBtn     = document.getElementById('cookie-btn');
   const cookieModal   = document.getElementById('cookie-modal');
   const cookieTbody   = document.getElementById('cookie-tbody');
@@ -151,6 +152,10 @@
         recordBtn.disabled = false;
         hideOverlay();
         setStatus(`재생 완료 — ${replayingName}`);
+        break;
+
+      case 'replay-result':
+        showReplayResult(msg);
         break;
 
       case 'cookies-applied':
@@ -405,6 +410,38 @@
     return String(s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ── Replay result badge ───────────────────────────────────────────────────────
+  function showReplayResult({ results, passed, failed, total }) {
+    resultBadge.className = 'result-badge';
+
+    if (total === 0) {
+      resultBadge.classList.add('hidden');
+      return;
+    }
+
+    let cls, icon, text;
+    if (failed === 0) {
+      cls  = 'pass';
+      icon = '✅';
+      text = `SUCCESS  ${passed}/${total} 응답 일치`;
+    } else if (passed === 0) {
+      cls  = 'fail';
+      icon = '❌';
+      text = `FAIL  ${failed}/${total} 응답 불일치`;
+    } else {
+      cls  = 'mixed';
+      icon = '⚠️';
+      text = `PARTIAL  ${passed} 성공 / ${failed} 실패`;
+    }
+
+    resultBadge.classList.add(cls);
+    resultBadge.innerHTML = `<span class="rb-icon">${icon}</span><span>${text}</span>`;
+
+    // Auto-hide after 15s
+    clearTimeout(resultBadge._timer);
+    resultBadge._timer = setTimeout(() => resultBadge.classList.add('hidden'), 15000);
   }
 
   // ── Cookie popup ──────────────────────────────────────────────────────────────

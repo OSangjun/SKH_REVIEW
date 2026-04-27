@@ -39,14 +39,17 @@ db.exec(`
     url         TEXT    NOT NULL,
     event_count INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT    NOT NULL,
-    events      TEXT    NOT NULL DEFAULT '[]'
+    events      TEXT    NOT NULL DEFAULT '[]',
+    responses   TEXT    NOT NULL DEFAULT '[]'
   )
 `);
+// Add responses column to existing DBs (safe no-op if already present)
+try { db.exec(`ALTER TABLE recordings ADD COLUMN responses TEXT NOT NULL DEFAULT '[]'`); } catch {}
 
 const stmts = {
   insertRecording: db.prepare(
-    `INSERT INTO recordings (name, url, event_count, created_at, events)
-     VALUES (@name, @url, @event_count, @created_at, @events)`
+    `INSERT INTO recordings (name, url, event_count, created_at, events, responses)
+     VALUES (@name, @url, @event_count, @created_at, @events, @responses)`
   ),
   allMeta: db.prepare(
     `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
@@ -56,7 +59,8 @@ const stmts = {
     `SELECT id, name, url, event_count AS eventCount, created_at AS createdAt
      FROM recordings WHERE id = ?`
   ),
-  getEvents: db.prepare(`SELECT events FROM recordings WHERE id = ?`),
+  getEvents:     db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
+  getResponses:  db.prepare(`SELECT responses FROM recordings WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
 };
 
@@ -91,20 +95,25 @@ const stmts = {
   }
 })();
 
-function dbAllMeta()        { return stmts.allMeta.all(); }
-function dbGetMeta(id)      { return stmts.getMeta.get(id) ?? null; }
-function dbLoadEvents(id)   {
+function dbAllMeta()              { return stmts.allMeta.all(); }
+function dbGetMeta(id)            { return stmts.getMeta.get(id) ?? null; }
+function dbLoadEvents(id) {
   const row = stmts.getEvents.get(id);
   if (!row) return null;
-  try { return JSON.parse(row.events); }
-  catch { return null; }
+  try { return JSON.parse(row.events); } catch { return null; }
 }
-function dbSaveRecording(name, url, eventCount, createdAt, events) {
+function dbLoadResponses(id) {
+  const row = stmts.getResponses.get(id);
+  if (!row) return [];
+  try { return JSON.parse(row.responses); } catch { return []; }
+}
+function dbSaveRecording(name, url, eventCount, createdAt, events, responses) {
   const info = stmts.insertRecording.run({
     name, url,
     event_count: eventCount,
     created_at:  createdAt,
     events:      JSON.stringify(events),
+    responses:   JSON.stringify(responses),
   });
   return info.lastInsertRowid;
 }
@@ -119,6 +128,7 @@ let activeWs      = null;   // connected frontend WebSocket
 
 let isRecording        = false;
 let capturedEvents     = [];
+let capturedResponses  = [];    // HTTP responses recorded during a session
 let recordingStartTime = null;
 let currentUrl         = 'about:blank';
 let firstNavigateDone  = false; // suppress navigate event on very first load
@@ -240,6 +250,15 @@ async function launchSession() {
     firstNavigateDone = true;
     currentUrl = url;
     send({ type: 'url-changed', url });
+  });
+
+  // Capture HTTP responses during recording
+  activePage.on('response', response => {
+    if (!isRecording) return;
+    const url = response.url();
+    if (url.startsWith('data:') || url.startsWith('blob:')) return;
+    const t = Date.now() - (recordingStartTime ?? Date.now());
+    capturedResponses.push({ url, status: response.status(), t });
   });
 
   // Handle page crashes / unexpected closes
@@ -369,6 +388,7 @@ async function handleClientMessage(msg, ws) {
     case 'start-recording':
       isRecording        = true;
       capturedEvents     = [];
+      capturedResponses  = [];
       recordingStartTime = null;
       firstNavigateDone  = true;
       ws.send(JSON.stringify({ type: 'recording-started' }));
@@ -377,18 +397,19 @@ async function handleClientMessage(msg, ws) {
 
     case 'stop-recording': {
       isRecording = false;
-      console.log(`[Recording] Stopped — ${capturedEvents.length} events`);
+      console.log(`[Recording] Stopped — ${capturedEvents.length} events, ${capturedResponses.length} responses`);
       if (capturedEvents.length === 0) {
         ws.send(JSON.stringify({ type: 'recording-empty' }));
         break;
       }
       const createdAt = new Date().toISOString();
       const newId     = dbSaveRecording(
-        `녹화 #?`,          // placeholder; updated after we know the real id
+        `녹화 #?`,
         currentUrl,
         capturedEvents.length,
         createdAt,
         [...capturedEvents],
+        [...capturedResponses],
       );
       // Update name to reflect actual auto-increment id
       db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`)
@@ -404,9 +425,10 @@ async function handleClientMessage(msg, ws) {
     case 'replay': {
       const meta = dbGetMeta(msg.id);
       if (!meta) break;
-      const events = dbLoadEvents(msg.id);
+      const events    = dbLoadEvents(msg.id);
       if (!events) break;
-      await runReplay(events, meta.url, msg.speedFactor ?? 1.0, ws);
+      const responses = dbLoadResponses(msg.id);
+      await runReplay(events, responses, meta.url, msg.speedFactor ?? 1.0, ws);
       break;
     }
 
@@ -432,38 +454,87 @@ async function waitNetworkIdle(timeout = 5000) {
 // Events that typically trigger network requests and warrant idle-waiting
 const NETWORK_EVENTS = new Set(['navigate', 'click', 'dblclick']);
 
-async function runReplay(events, startUrl, speedFactor, ws) {
+// Build a lookup map from URL → [recorded statuses] for comparison
+function buildResponseMap(responses) {
+  const map = new Map();
+  for (const r of responses) {
+    const key = normalizeUrl(r.url);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(r.status);
+  }
+  return map;
+}
+
+function normalizeUrl(url) {
+  try {
+    const u = new URL(url);
+    u.search = ''; // strip query params (tokens, timestamps etc. vary per run)
+    return u.toString();
+  } catch { return url; }
+}
+
+function compareResponses(recorded, actual) {
+  const recMap = buildResponseMap(recorded);
+  const results = [];
+  for (const r of actual) {
+    const key      = normalizeUrl(r.url);
+    const expected = recMap.get(key);
+    if (!expected) continue;          // new URL not in recording — skip
+    const match = expected.includes(r.status);
+    results.push({ url: r.url, expected: expected[0], actual: r.status, pass: match });
+  }
+  return results;
+}
+
+async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
   ws.send(JSON.stringify({ type: 'replay-started' }));
 
-  firstNavigateDone = false;
-  if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
-  await activePage.goto(startUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+  const replayResponses = [];
+  const onResponse = response => {
+    const url = response.url();
+    if (url.startsWith('data:') || url.startsWith('blob:')) return;
+    replayResponses.push({ url, status: response.status() });
+  };
+  activePage.on('response', onResponse);
 
-  const total = events.length;
-  let lastT   = 0;
+  try {
+    firstNavigateDone = false;
+    if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
+    await activePage.goto(startUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-  for (let i = 0; i < total; i++) {
-    const ev    = events[i];
-    // Preserve original inter-event timing (scaled by speedFactor)
-    const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
-    if (delay > 0) await sleep(delay);
-    lastT = ev.t ?? 0;
+    const total = events.length;
+    let lastT   = 0;
 
-    await dispatchReplayEvent(ev);
+    for (let i = 0; i < total; i++) {
+      const ev    = events[i];
+      const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
+      if (delay > 0) await sleep(delay);
+      lastT = ev.t ?? 0;
 
-    // After events that may trigger XHR / navigation, wait for network to settle
-    if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
+      await dispatchReplayEvent(ev);
 
-    // Enter key may submit a form → wait for network
-    if (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'))
-      await waitNetworkIdle(5000);
+      if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
+      if (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'))
+        await waitNetworkIdle(5000);
 
-    if (i % 5 === 0 || i === total - 1)
-      ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
+      if (i % 5 === 0 || i === total - 1)
+        ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
+    }
+  } finally {
+    activePage.off('response', onResponse);
   }
 
+  // Compare recorded vs actual responses and send result
+  const results = recordedResponses.length > 0
+    ? compareResponses(recordedResponses, replayResponses)
+    : [];
+
+  const passed = results.filter(r => r.pass).length;
+  const failed = results.filter(r => !r.pass).length;
+
   ws.send(JSON.stringify({ type: 'replay-done' }));
-  console.log('[Replay] Done');
+  ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length }));
+  console.log(`[Replay] Done — responses: ${passed} pass / ${failed} fail`);
 }
 
 const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
