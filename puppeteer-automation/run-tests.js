@@ -677,6 +677,21 @@ async function waitNetworkIdle(page, timeout, idleTime = 500) {
 const BTN = (b) =>
   b === "right" ? "right" : b === "middle" ? "middle" : "left";
 
+// Pick the element matching `selector` whose visible text equals `label`,
+// falling back to the first match if none of them match the label. This
+// disambiguates class-only selectors like `button.btn-quick` that match
+// many elements during a recording.
+async function pickByLabelOrFirst(page, selector, label) {
+  const handles = await page.$$(selector);
+  if (handles.length === 0) return null;
+  if (handles.length === 1 || !label) return handles[0];
+  for (const h of handles) {
+    const txt = await h.evaluate((e) => (e.innerText || "").trim());
+    if (txt === label) return h;
+  }
+  return handles[0];
+}
+
 async function dispatchEvent(page, ev, baseUrl, fast = false) {
   switch (ev.type) {
     case "navigate":
@@ -688,7 +703,7 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "click":
       if (ev.selector) {
         try {
-          const el = await page.$(ev.selector);
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
           if (el) {
             await el.click();
             break;
@@ -700,7 +715,7 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "dblclick":
       if (ev.selector) {
         try {
-          const el = await page.$(ev.selector);
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
           if (el) {
             await el.click({ clickCount: 2 });
             break;
@@ -837,17 +852,20 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     if (cookies.length > 0) await page.setCookie(...cookies);
 
     const startUrl = applyBaseUrl(rec.url, opts.baseUrl);
+    const idleTime = opts.fast ? 200 : 500;
     // Reuse the existing page when its URL already matches the recording's
     // start URL — skip the navigation/refresh between consecutive tests.
     if (page.url() !== startUrl) {
       if (opts.verbose) console.log(`  ${C.dim}Load: ${startUrl}${C.reset}`);
       const waitUntil = opts.fast ? "domcontentloaded" : "networkidle2";
       await page.goto(startUrl, { waitUntil, timeout: 30000 });
+      // Fast mode uses domcontentloaded which can resolve before in-flight
+      // response bodies are available — wait for network to settle so that
+      // r.buffer() inside the response listener succeeds.
+      if (opts.fast) await waitNetworkIdle(page, opts.timeout, idleTime);
     } else if (opts.verbose) {
       console.log(`  ${C.dim}Reuse: ${startUrl}${C.reset}`);
     }
-
-    const idleTime = opts.fast ? 200 : 500;
 
     let lastT = 0;
     for (let i = 0; i < events.length; i++) {
