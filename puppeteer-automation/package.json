@@ -5,6 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node server.js",
+    "test":  "node run-tests.js --all",
+    "test:junit": "node run-tests.js --all --junit test-results.xml",
     "cli:record": "node src/index.js record",
     "cli:replay": "node src/index.js replay"
   },
