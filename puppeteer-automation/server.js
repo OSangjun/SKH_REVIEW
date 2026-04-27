@@ -238,11 +238,67 @@ function buildCaptureScript() {
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
+    // Build a stable CSS selector for form/interactive elements
+    function getSelector(el) {
+      if (!el || !el.tagName) return null;
+      var tag = el.tagName.toLowerCase();
+      if (el.id && /^[a-zA-Z]/.test(el.id) && !el.id.includes(' '))
+        return '#' + el.id;
+      if (el.name)
+        return tag + '[name=' + JSON.stringify(el.name) + ']';
+      var testId = el.getAttribute && el.getAttribute('data-testid');
+      if (testId) return '[data-testid=' + JSON.stringify(testId) + ']';
+      var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
+      if (ariaLabel) return tag + '[aria-label=' + JSON.stringify(ariaLabel) + ']';
+      if (tag === 'input' && el.type && ['checkbox','radio'].includes(el.type))
+        return el.value
+          ? tag + '[type=' + JSON.stringify(el.type) + '][value=' + JSON.stringify(el.value) + ']'
+          : tag + '[type=' + JSON.stringify(el.type) + ']';
+      if (tag === 'input' && el.placeholder)
+        return tag + '[placeholder=' + JSON.stringify(el.placeholder) + ']';
+      return null;
+    }
+
+    // Get visible label text for an element
+    function getLabel(el) {
+      if (!el) return null;
+      var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
+      if (ariaLabel) return ariaLabel;
+      var labelledBy = el.getAttribute && el.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        var lbEl = document.getElementById(labelledBy);
+        if (lbEl) return (lbEl.innerText || lbEl.textContent || '').trim() || null;
+      }
+      if (el.id) {
+        var lEl = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
+        if (lEl) return (lEl.innerText || lEl.textContent || '').trim() || null;
+      }
+      if (el.placeholder) return el.placeholder;
+      return null;
+    }
+
+    function isInteractive(el) {
+      if (!el || !el.tagName) return false;
+      var tag = el.tagName.toUpperCase();
+      if (['INPUT','SELECT','TEXTAREA','BUTTON','A','LABEL'].includes(tag)) return true;
+      var role = el.getAttribute && el.getAttribute('role');
+      return !!(role && ['button','checkbox','radio','combobox','listbox','option','menuitem','tab','link'].includes(role));
+    }
+
+    function withTarget(base, el) {
+      if (!isInteractive(el)) return base;
+      var sel = getSelector(el);
+      var lbl = getLabel(el);
+      if (sel) base.selector = sel;
+      if (lbl) base.label    = lbl;
+      return base;
+    }
+
     document.addEventListener('click', e => {
-      cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button) });
+      cap('click', withTarget({ x: e.clientX, y: e.clientY, button: btn(e.button) }, e.target));
     }, true);
     document.addEventListener('dblclick', e => {
-      cap('dblclick', { x: e.clientX, y: e.clientY });
+      cap('dblclick', withTarget({ x: e.clientX, y: e.clientY }, e.target));
     }, true);
     document.addEventListener('wheel',
       e => cap('wheel', { x: e.clientX, y: e.clientY, deltaX: e.deltaX, deltaY: e.deltaY }),
@@ -264,18 +320,25 @@ function buildCaptureScript() {
       e => cap('keyup', { key: e.key, code: e.code }), true);
 
     document.addEventListener('input', e => {
-      const el = e.target;
+      var el = e.target;
       if (!el) return;
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        cap('input', { value: el.value });
+        cap('input', withTarget({ value: el.value }, el));
       } else if (el.isContentEditable) {
         cap('contenteditable', { html: el.innerHTML, text: el.innerText });
       }
     }, true);
 
     document.addEventListener('change', e => {
-      if (e.target && e.target.tagName === 'SELECT')
-        cap('select', { value: e.target.value });
+      var el = e.target;
+      if (!el) return;
+      if (el.tagName === 'SELECT') {
+        var optLabel = el.options && el.selectedIndex >= 0
+          ? (el.options[el.selectedIndex].text || '').trim() : '';
+        cap('select', withTarget({ value: el.value, optLabel: optLabel }, el));
+      } else if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+        cap('check', withTarget({ checked: el.checked, value: el.value }, el));
+      }
     }, true);
 
     // Toast / notification observer (role="alert" or role="status")
@@ -965,9 +1028,21 @@ async function dispatchReplayEvent(ev) {
         await activePage.goto(ev.url, { waitUntil: 'networkidle2', timeout: 30000 });
         break;
       case 'click':
+        if (ev.selector) {
+          try {
+            const el = await activePage.$(ev.selector);
+            if (el) { await el.click(); break; }
+          } catch {}
+        }
         await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
       case 'dblclick':
+        if (ev.selector) {
+          try {
+            const el = await activePage.$(ev.selector);
+            if (el) { await el.click({ clickCount: 2 }); break; }
+          } catch {}
+        }
         await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;
       case 'wheel':
@@ -983,10 +1058,41 @@ async function dispatchReplayEvent(ev) {
         await activePage.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
         break;
       case 'input':
+        if (ev.selector) {
+          try {
+            const el = await activePage.$(ev.selector);
+            if (el) { await el.click({ clickCount: 3 }); await el.type(ev.value ?? ''); break; }
+          } catch {}
+        }
         await activePage.keyboard.down('Control');
         await activePage.keyboard.press('a');
         await activePage.keyboard.up('Control');
         await activePage.keyboard.type(ev.value ?? '');
+        break;
+      case 'select':
+        if (ev.selector) {
+          try { await activePage.select(ev.selector, ev.value); break; } catch {}
+        }
+        await activePage.evaluate(v => {
+          const el = document.activeElement;
+          if (el && el.tagName === 'SELECT') {
+            el.value = v;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }, ev.value);
+        break;
+      case 'check':
+        if (ev.selector) {
+          try {
+            const el = await activePage.$(ev.selector);
+            if (el) {
+              const cur = await el.evaluate(n => n.checked);
+              if (cur !== ev.checked) await el.click();
+              break;
+            }
+          } catch {}
+        }
+        await activePage.mouse.click(ev.x ?? 0, ev.y ?? 0);
         break;
       case 'contenteditable':
         await activePage.evaluate(

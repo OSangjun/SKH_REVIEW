@@ -399,9 +399,21 @@ async function dispatchEvent(page, ev, baseUrl) {
       await page.goto(applyBaseUrl(ev.url, baseUrl), { waitUntil: 'networkidle2', timeout: 30000 });
       break;
     case 'click':
+      if (ev.selector) {
+        try {
+          const el = await page.$(ev.selector);
+          if (el) { await el.click(); break; }
+        } catch {}
+      }
       await page.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
       break;
     case 'dblclick':
+      if (ev.selector) {
+        try {
+          const el = await page.$(ev.selector);
+          if (el) { await el.click({ clickCount: 2 }); break; }
+        } catch {}
+      }
       await page.mouse.click(ev.x, ev.y, { clickCount: 2 });
       break;
     case 'wheel':
@@ -417,17 +429,21 @@ async function dispatchEvent(page, ev, baseUrl) {
       await page.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
       break;
     case 'input':
+      if (ev.selector) {
+        try {
+          const el = await page.$(ev.selector);
+          if (el) { await el.click({ clickCount: 3 }); await el.type(ev.value ?? ''); break; }
+        } catch {}
+      }
       await page.keyboard.down('Control');
       await page.keyboard.press('a');
       await page.keyboard.up('Control');
       await page.keyboard.type(ev.value ?? '');
       break;
-    case 'contenteditable':
-      await page.evaluate(h => {
-        if (document.activeElement) document.activeElement.innerHTML = h;
-      }, ev.html);
-      break;
     case 'select':
+      if (ev.selector) {
+        try { await page.select(ev.selector, ev.value); break; } catch {}
+      }
       await page.evaluate(v => {
         const el = document.activeElement;
         if (el && el.tagName === 'SELECT') {
@@ -435,6 +451,24 @@ async function dispatchEvent(page, ev, baseUrl) {
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }
       }, ev.value);
+      break;
+    case 'check':
+      if (ev.selector) {
+        try {
+          const el = await page.$(ev.selector);
+          if (el) {
+            const cur = await el.evaluate(n => n.checked);
+            if (cur !== ev.checked) await el.click();
+            break;
+          }
+        } catch {}
+      }
+      await page.mouse.click(ev.x ?? 0, ev.y ?? 0);
+      break;
+    case 'contenteditable':
+      await page.evaluate(h => {
+        if (document.activeElement) document.activeElement.innerHTML = h;
+      }, ev.html);
       break;
   }
 }

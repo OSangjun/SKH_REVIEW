@@ -5,3 +5,4 @@ recordings/meta.json
 *.db-shm
 *.db-wal
 package-lock.json
+.env
