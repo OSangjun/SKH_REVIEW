@@ -419,10 +419,16 @@
   // ── Suite button ──────────────────────────────────────────────────────────────
   function updateSuiteBtn() {
     const busy = isReplaying || suiteMode;
-    suiteBtn.disabled = recordings.length === 0 || busy;
+    const empty = recordings.length === 0;
+    suiteBtn.disabled = empty || busy;
     suiteBtn.textContent = checkedIds.size > 0
       ? `⚡ 스위트 (${checkedIds.size})`
       : '⚡ 스위트';
+    suiteBtn.title = empty  ? '녹화가 없습니다'
+      : suiteMode           ? '스위트 실행 중'
+      : isReplaying         ? '재생 중 — 완료 후 사용 가능'
+      : checkedIds.size > 0 ? `선택된 ${checkedIds.size}개 녹화를 순서대로 실행`
+      :                       '모든 녹화를 순서대로 일괄 실행';
   }
 
   suiteBtn.addEventListener('click', () => {
@@ -648,27 +654,33 @@
   });
 
   // ── Replay result badge ───────────────────────────────────────────────────────
-  function showReplayResult({ results, passed, failed, total }) {
+  function showReplayResult({ results, toastResults, jsErrors, passed, failed, total }) {
     resultBadge.className = 'result-badge';
 
-    if (total === 0) {
+    const jsFail    = (jsErrors   || []).length;
+    const toastFail = (toastResults || []).filter(r => !r.pass).length;
+    const totalFail = failed;  // already includes all failure types from server
+
+    if (total === 0 && jsFail === 0) {
       resultBadge.classList.add('hidden');
       return;
     }
 
     let cls, icon, text;
-    if (failed === 0) {
+    if (totalFail === 0 && jsFail === 0) {
       cls  = 'pass';
       icon = '✅';
-      text = `SUCCESS  ${passed}/${total} 응답 일치`;
-    } else if (passed === 0) {
+      text = `SUCCESS  ${passed}/${total}`;
+      if (toastResults && toastResults.length) text += `  🔔${toastResults.length}`;
+    } else if (passed === 0 && totalFail > 0) {
       cls  = 'fail';
       icon = '❌';
-      text = `FAIL  ${failed}/${total} 응답 불일치`;
+      text = `FAIL  ${totalFail}건 실패`;
+      if (jsFail) text += `  ⚠JS×${jsFail}`;
     } else {
       cls  = 'mixed';
       icon = '⚠️';
-      text = `PARTIAL  ${passed} 성공 / ${failed} 실패`;
+      text = `PARTIAL  ${passed} 성공 / ${totalFail} 실패`;
     }
 
     resultBadge.classList.add(cls);

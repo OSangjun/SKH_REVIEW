@@ -328,6 +328,10 @@ body.log-collapsed #log-body { display: none; }
   cursor: crosshair;
   outline: none;
 }
+#browser-canvas:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 
 /* ── Recording panel ─────────────────────────────────────────────────────── */
 #rec-panel {
@@ -471,8 +475,13 @@ body.log-collapsed #log-body { display: none; }
   display: flex;
   flex-direction: column;
   gap: 5px;
+  animation: slideDown .15s ease-out;
 }
 .rec-edit-form.hidden { display: none; }
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 .edit-name-input,
 .edit-desc-input,
@@ -598,16 +607,20 @@ body.log-collapsed #log-body { display: none; }
 .btn-rec-json,
 .btn-rec-script {
   flex: 1;
+  min-width: 0;
   background: transparent;
   color: var(--text-dim);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 3px 0;
-  font-size: 10px;
+  padding: 3px 2px;
+  font-size: 9px;
   font-weight: 600;
   cursor: pointer;
-  letter-spacing: .02em;
+  letter-spacing: .01em;
   transition: border-color .15s, color .15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .btn-rec-http:hover   { border-color: #27ae60; color: #27ae60; }
 .btn-rec-json:hover   { border-color: #3b82f6; color: #3b82f6; }
