@@ -654,12 +654,12 @@
   });
 
   // ── Replay result badge ───────────────────────────────────────────────────────
-  function showReplayResult({ results, toastResults, jsErrors, passed, failed, total }) {
+  function showReplayResult({ results, toastResults, triggerResults, jsErrors, passed, failed, total }) {
     resultBadge.className = 'result-badge';
 
-    const jsFail    = (jsErrors   || []).length;
-    const toastFail = (toastResults || []).filter(r => !r.pass).length;
-    const totalFail = failed;  // already includes all failure types from server
+    const jsFail      = (jsErrors       || []).length;
+    const triggerFail = (triggerResults || []).filter(r => !r.pass).length;
+    const totalFail   = failed;  // already includes all failure types from server
 
     if (total === 0 && jsFail === 0) {
       resultBadge.classList.add('hidden');
@@ -672,11 +672,13 @@
       icon = '✅';
       text = `SUCCESS  ${passed}/${total}`;
       if (toastResults && toastResults.length) text += `  🔔${toastResults.length}`;
+      if (triggerResults && triggerResults.length) text += `  🔗${triggerResults.length}`;
     } else if (passed === 0 && totalFail > 0) {
       cls  = 'fail';
       icon = '❌';
       text = `FAIL  ${totalFail}건 실패`;
-      if (jsFail) text += `  ⚠JS×${jsFail}`;
+      if (jsFail)      text += `  ⚠JS×${jsFail}`;
+      if (triggerFail) text += `  🔗×${triggerFail}`;
     } else {
       cls  = 'mixed';
       icon = '⚠️';

@@ -648,13 +648,19 @@ async function handleClientMessage(msg, ws) {
         ws.send(JSON.stringify({ type: 'recording-empty' }));
         break;
       }
+      // Map HTTP responses to the events that triggered them
+      const eventsWithMapping = mapResponsesToEvents([...capturedEvents], [...capturedResponses]);
+      const triggeredCount = eventsWithMapping.filter(e => e.triggeredUrls?.length).length;
+      if (triggeredCount > 0)
+        console.log(`[Recording] Event→HTTP mapping: ${triggeredCount} events mapped`);
+
       const createdAt = new Date().toISOString();
       const newId     = dbSaveRecording(
         `녹화 #?`,
         currentUrl,
         capturedEvents.length,
         createdAt,
-        [...capturedEvents],
+        eventsWithMapping,
         [...capturedResponses],
         [...sessionCookies],
         [...capturedToasts],
@@ -755,6 +761,57 @@ async function waitNetworkIdle(timeout = 5000) {
 const NETWORK_EVENTS = new Set(['navigate', 'click', 'dblclick']);
 // Events that never cause HTTP requests — replayed without timing delay
 const NO_DELAY_EVENTS = new Set(['keydown', 'keyup', 'input', 'scroll', 'wheel', 'contenteditable']);
+
+// Returns true for events that can trigger HTTP requests
+function isNetworkTrigger(ev) {
+  return ['click', 'dblclick', 'navigate', 'check', 'select'].includes(ev.type) ||
+    (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'));
+}
+
+/**
+ * Post-processing at stop-recording time.
+ * For each triggering event, find all HTTP responses that arrived between
+ * this event's timestamp and the next trigger event's timestamp, and attach
+ * their URLs as event.triggeredUrls.
+ */
+function mapResponsesToEvents(events, responses) {
+  const triggerIdxs = [];
+  for (let i = 0; i < events.length; i++) {
+    if (isNetworkTrigger(events[i])) triggerIdxs.push(i);
+  }
+  for (let k = 0; k < triggerIdxs.length; k++) {
+    const idx    = triggerIdxs[k];
+    const tStart = events[idx].t ?? 0;
+    const tEnd   = k + 1 < triggerIdxs.length
+      ? (events[triggerIdxs[k + 1]].t ?? Infinity)
+      : Infinity;
+    const urls = responses
+      .filter(r => r.t != null && r.t >= tStart && r.t < tEnd)
+      .map(r => r.url);
+    if (urls.length > 0) events[idx].triggeredUrls = urls;
+  }
+  return events;
+}
+
+/**
+ * Compare per-event trigger mappings: for each recorded triggeredUrls,
+ * check if the same URLs were seen during replay in the same event window.
+ * replayTriggerMap: Map<eventIndex, string[]> built during replay.
+ */
+function compareTriggerMappings(events, replayTriggerMap) {
+  const results = [];
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (!Array.isArray(ev.triggeredUrls) || ev.triggeredUrls.length === 0) continue;
+    const actual = (replayTriggerMap.get(i) || []).map(normalizeUrl);
+    const label  = ev.label || ev.selector
+      || (ev.type === 'keydown' ? `키[${ev.key}]` : `(${ev.x ?? ''},${ev.y ?? ''})`);
+    for (const url of ev.triggeredUrls) {
+      results.push({ eventType: ev.type, eventLabel: label, url, pass: actual.includes(normalizeUrl(url)) });
+    }
+  }
+  return results;
+}
 
 // Build a lookup map: normalizedUrl → [recorded response objects]
 function buildResponseMap(responses) {
@@ -867,8 +924,10 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
 
   const replayResponses    = [];
+  const replayResponseUrls = [];   // synchronous URL capture for trigger mapping
   const replayRespPending  = new Set();
   const recMap             = buildResponseMap(recordedResponses);
+  const replayTriggerMap   = new Map(); // eventIdx → [url, ...]
   const jsErrors           = [];
 
   replayToasts      = [];
@@ -883,6 +942,7 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   const onResponse = response => {
     const url = response.url();
     if (url.startsWith('data:') || url.startsWith('blob:')) return;
+    replayResponseUrls.push(url);   // synchronous — used for trigger mapping
     const ct       = (response.headers()['content-type'] || '').toLowerCase();
     const status   = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
@@ -941,11 +1001,18 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
           log('info',  `[Input] "${String(ev.value ?? '').slice(0, 40)}"`); break;
       }
 
+      const isTrigger = isNetworkTrigger(ev);
+      const snapLen   = isTrigger ? replayResponseUrls.length : -1;
+
       await dispatchReplayEvent(ev);
 
       if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
       if (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'))
         await waitNetworkIdle(5000);
+      if (ev.type === 'check' || ev.type === 'select') await waitNetworkIdle(5000);
+
+      if (isTrigger && snapLen >= 0)
+        replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
 
       if (i % 5 === 0 || i === total - 1)
         ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
@@ -966,12 +1033,14 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     ? compareResponses(recordedResponses, replayResponses)
     : [];
 
-  const toastResults = compareToasts(recordingToasts, replayToasts);
-  const passed       = results.filter(r => r.pass).length;
-  const httpFailed   = results.filter(r => !r.pass).length;
-  const toastFailed  = toastResults.filter(r => !r.pass).length;
-  const scriptFailed = jsErrors.length;
-  const failed       = httpFailed + toastFailed + scriptFailed;
+  const toastResults   = compareToasts(recordingToasts, replayToasts);
+  const triggerResults = compareTriggerMappings(events, replayTriggerMap);
+  const passed         = results.filter(r => r.pass).length;
+  const httpFailed     = results.filter(r => !r.pass).length;
+  const toastFailed    = toastResults.filter(r => !r.pass).length;
+  const triggerFailed  = triggerResults.filter(r => !r.pass).length;
+  const scriptFailed   = jsErrors.length;
+  const failed         = httpFailed + toastFailed + triggerFailed + scriptFailed;
 
   if (results.length > 0) {
     if (httpFailed === 0)
@@ -1007,19 +1076,31 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
     }
   }
 
+  if (triggerResults.length > 0) {
+    if (triggerFailed === 0)
+      log('success', `━━ 이벤트-HTTP 매핑: SUCCESS — ${triggerResults.length}건 일치 ━━`);
+    else
+      log('fail',    `━━ 이벤트-HTTP 매핑: FAIL — ${triggerFailed}/${triggerResults.length}건 불일치 ━━`);
+    for (const r of triggerResults) {
+      if (r.pass) log('success', `  ✓ [${r.eventType}:${r.eventLabel}] → ${r.url}`);
+      else        log('fail',    `  ✗ [${r.eventType}:${r.eventLabel}] → ${r.url} — 재생 시 미감지`);
+    }
+  }
+
   if (jsErrors.length > 0) {
     log('fail', `━━ 스크립트 에러 ${jsErrors.length}건 감지 ━━`);
     for (const e of jsErrors)
       log('fail', `  ✗ [JS Error] ${e}`);
   }
 
+  const total      = results.length + toastResults.length + triggerResults.length;
   const durationMs = Date.now() - startMs;
-  dbSaveHistory(recordingId, passed, failed, results.length + toastResults.length, results, durationMs);
+  dbSaveHistory(recordingId, passed, failed, total, results, durationMs);
   ws.send(JSON.stringify({ type: 'history', recordingId, runs: dbGetHistory(recordingId) }));
 
   if (!isSuite) ws.send(JSON.stringify({ type: 'replay-done' }));
-  ws.send(JSON.stringify({ type: 'replay-result', results, toastResults, passed, failed, total: results.length + toastResults.length, jsErrors }));
-  return { passed, failed, total: results.length + toastResults.length };
+  ws.send(JSON.stringify({ type: 'replay-result', results, toastResults, triggerResults, passed, failed, total, jsErrors }));
+  return { passed, failed, total };
 }
 
 const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');

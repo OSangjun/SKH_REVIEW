@@ -356,6 +356,26 @@ function compareToasts(recorded, actual) {
   });
 }
 
+function isNetworkTrigger(ev) {
+  return ['click', 'dblclick', 'navigate', 'check', 'select'].includes(ev.type) ||
+    (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'));
+}
+
+function compareTriggerMappings(events, replayTriggerMap) {
+  const results = [];
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (!Array.isArray(ev.triggeredUrls) || ev.triggeredUrls.length === 0) continue;
+    const actual = (replayTriggerMap.get(i) || []).map(normalizeUrl);
+    const label  = ev.label || ev.selector
+      || (ev.type === 'keydown' ? `키[${ev.key}]` : `(${ev.x ?? ''},${ev.y ?? ''})`);
+    for (const url of ev.triggeredUrls) {
+      results.push({ eventType: ev.type, eventLabel: label, url, pass: actual.includes(normalizeUrl(url)) });
+    }
+  }
+  return results;
+}
+
 const TOAST_OBSERVER_SCRIPT = `(function() {
   if (window.__CDP_TOAST_OBSERVER__) return;
   window.__CDP_TOAST_OBSERVER__ = true;
@@ -490,7 +510,9 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
   await page.exposeFunction('__captureToast', text => { replayToasts.push(text); });
   await page.evaluateOnNewDocument(TOAST_OBSERVER_SCRIPT);
 
-  const replayResponses = [];
+  const replayResponses    = [];
+  const replayResponseUrls = [];   // synchronous URL capture for trigger mapping
+  const replayTriggerMap   = new Map(); // eventIdx → [url, ...]
   const pending   = new Set();
   const jsErrors  = [];
 
@@ -503,6 +525,7 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
   const onResponse = response => {
     const url = response.url();
     if (url.startsWith('data:') || url.startsWith('blob:')) return;
+    replayResponseUrls.push(url);   // synchronous — used for trigger mapping
     const ct       = (response.headers()['content-type'] || '').toLowerCase();
     const status   = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
@@ -533,7 +556,8 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
     await page.goto(startUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
     let lastT = 0;
-    for (const ev of events) {
+    for (let i = 0; i < events.length; i++) {
+      const ev    = events[i];
       const delay = NO_DELAY_EVTS.has(ev.type)
         ? 0
         : Math.max(0, ((ev.t ?? 0) - lastT) / opts.speed);
@@ -550,11 +574,18 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
         console.log(`  ${C.dim}[${ev.type}]${detail ? ' ' + detail : ''}${C.reset}`);
       }
 
+      const isTrigger = isNetworkTrigger(ev);
+      const snapLen   = isTrigger ? replayResponseUrls.length : -1;
+
       try { await dispatchEvent(page, ev, opts.baseUrl); } catch {}
 
       const needsWait = NETWORK_EVTS.has(ev.type) ||
-        (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'));
+        (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter')) ||
+        ev.type === 'check' || ev.type === 'select';
       if (needsWait) await waitNetworkIdle(page, opts.timeout);
+
+      if (isTrigger && snapLen >= 0)
+        replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
     }
   } catch (err) {
     error = err.message;
@@ -566,15 +597,18 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
     await page.close();
   }
 
-  const duration     = (Date.now() - startMs) / 1000;
-  const results      = recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
-  const toastResults = compareToasts(recordedToasts, replayToasts);
-  const passed       = results.filter(r => r.pass).length;
-  const httpFailed   = results.filter(r => !r.pass).length;
-  const toastFailed  = toastResults.filter(r => !r.pass).length;
-  const failed       = httpFailed + toastFailed + jsErrors.length;
+  const duration       = (Date.now() - startMs) / 1000;
+  const results        = recorded.length > 0 ? compareResponses(recorded, replayResponses) : [];
+  const toastResults   = compareToasts(recordedToasts, replayToasts);
+  const triggerResults = compareTriggerMappings(events, replayTriggerMap);
+  const passed         = results.filter(r => r.pass).length;
+  const httpFailed     = results.filter(r => !r.pass).length;
+  const toastFailed    = toastResults.filter(r => !r.pass).length;
+  const triggerFailed  = triggerResults.filter(r => !r.pass).length;
+  const failed         = httpFailed + toastFailed + triggerFailed + jsErrors.length;
+  const total          = results.length + toastResults.length + triggerResults.length;
 
-  return { rec, results, toastResults, passed, failed, total: results.length + toastResults.length, duration, error, jsErrors };
+  return { rec, results, toastResults, triggerResults, passed, failed, total, duration, error, jsErrors };
 }
 
 // ── Output formatters ─────────────────────────────────────────────────────────
@@ -617,6 +651,12 @@ function printConsoleResults(suiteResults) {
             console.log(`  ${C.green}✓${C.reset} ${C.dim}[Toast]${C.reset} ${r.text}`);
           else
             console.log(`  ${C.red}✗${C.reset} ${C.dim}[Toast]${C.reset} "${r.text}" — not seen in replay`);
+        }
+        for (const r of (s.triggerResults ?? [])) {
+          if (r.pass)
+            console.log(`  ${C.green}✓${C.reset} ${C.dim}[Trigger:${r.eventType}]${C.reset} ${r.url}`);
+          else
+            console.log(`  ${C.red}✗${C.reset} ${C.dim}[Trigger:${r.eventType}]${C.reset} ${r.url} — not triggered in replay`);
         }
       }
       if (hasJsErr) {
@@ -705,6 +745,14 @@ function writeJunitReport(suiteResults, outPath) {
           if (!r.pass) {
             lines.push(`    <testcase name="[Toast] ${esc(r.text.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);
             lines.push(`      <failure message="Toast not seen in replay: ${esc(r.text)}" type="ToastMismatch">${esc(r.text)}</failure>`);
+            lines.push('    </testcase>');
+          }
+        }
+        for (const r of (s.triggerResults ?? [])) {
+          if (!r.pass) {
+            const name = `[Trigger:${r.eventType}] ${r.url.slice(0, 100)}`;
+            lines.push(`    <testcase name="${esc(name)}" classname="${esc(s.rec.name)}" time="0">`);
+            lines.push(`      <failure message="URL not triggered in replay: ${esc(r.url)}" type="TriggerMismatch">${esc(r.url)}</failure>`);
             lines.push('    </testcase>');
           }
         }
