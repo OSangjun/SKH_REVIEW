@@ -47,32 +47,36 @@ const C = {
 function parseArgs() {
   const args = process.argv.slice(2);
   const opts = {
-    ids:     [],
-    all:     false,
-    list:    false,
-    speed:   1.0,
-    timeout: 5000,
-    output:  null,   // JSON report path
-    junit:   null,   // JUnit XML report path
-    baseUrl: null,   // replace origin of all URLs
-    verbose: false,
+    ids:        [],
+    all:        false,
+    list:       false,
+    speed:      1.0,
+    timeout:    5000,
+    output:     null,   // JSON report path
+    junit:      null,   // JUnit XML report path
+    baseUrl:    null,   // replace origin of all URLs
+    cookies:    [],     // raw --cookie strings
+    cookieFile: null,   // --cookie-file path
+    verbose:    false,
   };
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     switch (a) {
-      case '--id':      opts.ids.push(+args[++i]);                                   break;
-      case '--ids':     args[++i].split(',').forEach(x => opts.ids.push(+x.trim())); break;
-      case '--all':     opts.all     = true;                                          break;
-      case '--list':    opts.list    = true;                                          break;
-      case '--speed':   opts.speed   = parseFloat(args[++i]);                        break;
-      case '--timeout': opts.timeout = +args[++i];                                   break;
-      case '--output':  opts.output  = args[++i];                                    break;
-      case '--junit':   opts.junit   = args[++i];                                    break;
-      case '--base-url':opts.baseUrl = args[++i];                                    break;
-      case '--verbose': opts.verbose = true;                                          break;
-      case '-v':        opts.verbose = true;                                          break;
-      case '--help': case '-h': printHelp(); process.exit(0);                        break;
+      case '--id':          opts.ids.push(+args[++i]);                                   break;
+      case '--ids':         args[++i].split(',').forEach(x => opts.ids.push(+x.trim())); break;
+      case '--all':         opts.all        = true;                                       break;
+      case '--list':        opts.list       = true;                                       break;
+      case '--speed':       opts.speed      = parseFloat(args[++i]);                     break;
+      case '--timeout':     opts.timeout    = +args[++i];                                 break;
+      case '--output':      opts.output     = args[++i];                                  break;
+      case '--junit':       opts.junit      = args[++i];                                  break;
+      case '--base-url':    opts.baseUrl    = args[++i];                                  break;
+      case '--cookie':      opts.cookies.push(args[++i]);                                 break;
+      case '--cookie-file': opts.cookieFile = args[++i];                                  break;
+      case '--verbose':     opts.verbose    = true;                                        break;
+      case '-v':            opts.verbose    = true;                                        break;
+      case '--help': case '-h': printHelp(); process.exit(0);                             break;
       default:
         console.error(`Unknown option: ${a}  (--help for usage)`);
         process.exit(2);
@@ -89,25 +93,33 @@ ${C.bold}Usage:${C.reset}
   node run-tests.js [options]
 
 ${C.bold}Target selection:${C.reset}
-  --all               Run all recordings
-  --id <n>            Run a single recording by ID
-  --ids <n,n,n>       Run specific recordings (comma-separated IDs)
-  --list              List available recordings and exit
+  --all                    Run all recordings
+  --id <n>                 Run a single recording by ID
+  --ids <n,n,n>            Run specific recordings (comma-separated IDs)
+  --list                   List available recordings and exit
 
 ${C.bold}Replay options:${C.reset}
-  --speed <n>         Replay speed multiplier (default: 1.0)
-  --timeout <ms>      Network idle timeout in ms (default: 5000)
-  --base-url <url>    Replace origin of all URLs (for environment switching)
-                      e.g. --base-url https://staging.example.com
+  --speed <n>              Replay speed multiplier (default: 1.0)
+  --timeout <ms>           Network idle timeout in ms (default: 5000)
+  --base-url <url>         Replace origin of all URLs (for environment switching)
+                           e.g. --base-url https://staging.example.com
+
+${C.bold}Cookie options (override recording cookies, higher priority):${C.reset}
+  --cookie <spec>          Add a cookie. Format:
+                             name=value
+                             name=value;domain=.example.com;path=/;secure;httpOnly
+                           Repeat for multiple cookies.
+  --cookie-file <path>     Load cookies from a JSON file (array of cookie objects).
+                           JSON format: [{"name":"...","value":"...","domain":"..."}]
 
 ${C.bold}Output:${C.reset}
-  --output <file>     Write JSON report to file
-  --junit <file>      Write JUnit XML report to file (for CI systems)
-  --verbose, -v       Show event-level detail during replay
+  --output <file>          Write JSON report to file
+  --junit <file>           Write JUnit XML report to file (for CI systems)
+  --verbose, -v            Show event-level detail during replay
 
 ${C.bold}Environment variables:${C.reset}
-  CHROME_PATH         Chrome/Chromium executable path
-  BASE_URL            Same as --base-url
+  CHROME_PATH              Chrome/Chromium executable path
+  BASE_URL                 Same as --base-url
 
 ${C.bold}Exit codes:${C.reset}
   0   All tests passed (or no responses recorded to compare)
@@ -118,6 +130,9 @@ ${C.bold}Examples:${C.reset}
   node run-tests.js --all
   node run-tests.js --ids 1,2,3 --speed 2 --junit report.xml
   node run-tests.js --id 1 --verbose
+  node run-tests.js --all --cookie "session_id=abc123;domain=.example.com;secure"
+  node run-tests.js --all --cookie "auth=tok1" --cookie "pref=dark"
+  node run-tests.js --all --cookie-file ./cookies.json
   BASE_URL=https://staging.example.com node run-tests.js --all --output results.json
 `);
 }
@@ -172,6 +187,74 @@ function listRecordings(db) {
     console.log(`${pad(r.id, 4)}${pad(r.name, 24)}${pad(r.eventCount, 8)}${pad(fmt(r.createdAt), 22)}${r.url}${desc}`);
   }
   console.log();
+}
+
+// ── Cookie helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Parse a --cookie argument string into a Puppeteer cookie object.
+ * Format: "name=value[;domain=X][;path=/][;secure][;httpOnly][;sameSite=Lax]"
+ */
+function parseCookieArg(raw) {
+  const parts = raw.split(';').map(p => p.trim());
+  const eqIdx = parts[0].indexOf('=');
+  if (eqIdx < 0) {
+    console.error(`${C.red}Error:${C.reset} Invalid cookie format: "${raw}"`);
+    console.error('  Expected: name=value[;domain=X;path=/;secure;httpOnly]');
+    process.exit(2);
+  }
+  const name  = parts[0].slice(0, eqIdx).trim();
+  const value = parts[0].slice(eqIdx + 1);
+  if (!name) {
+    console.error(`${C.red}Error:${C.reset} Cookie name is empty in: "${raw}"`);
+    process.exit(2);
+  }
+  const cookie = { name, value };
+  for (const part of parts.slice(1)) {
+    const ei  = part.indexOf('=');
+    const key = (ei < 0 ? part : part.slice(0, ei)).trim().toLowerCase();
+    const val = ei < 0 ? undefined : part.slice(ei + 1).trim();
+    switch (key) {
+      case 'domain':   cookie.domain   = val;  break;
+      case 'path':     cookie.path     = val;  break;
+      case 'secure':   cookie.secure   = true; break;
+      case 'httponly': cookie.httpOnly = true; break;
+      case 'samesite': cookie.sameSite = val;  break;
+    }
+  }
+  return cookie;
+}
+
+/**
+ * Load cookies from a JSON file.
+ * File must contain a JSON array of cookie objects with at least name+value.
+ */
+function loadCookieFile(filePath) {
+  const abs = path.resolve(filePath);
+  if (!fs.existsSync(abs)) {
+    console.error(`${C.red}Error:${C.reset} Cookie file not found: ${abs}`);
+    process.exit(2);
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(abs, 'utf8'));
+    if (!Array.isArray(parsed)) throw new Error('expected a JSON array');
+    return parsed.filter(c => c && c.name && c.value !== undefined);
+  } catch (err) {
+    console.error(`${C.red}Error:${C.reset} Failed to read cookie file: ${err.message}`);
+    process.exit(2);
+  }
+}
+
+/**
+ * Merge recording cookies with CLI cookies.
+ * CLI cookies take precedence: if the same name exists in both, CLI wins.
+ */
+function mergeCookies(recordingCookies, cliCookies) {
+  if (cliCookies.length === 0) return recordingCookies;
+  const map = new Map();
+  for (const c of recordingCookies) map.set(c.name, c);
+  for (const c of cliCookies)       map.set(c.name, c); // overrides by name
+  return [...map.values()];
 }
 
 // ── Replay utilities ───────────────────────────────────────────────────────────
@@ -326,10 +409,10 @@ async function dispatchEvent(page, ev, baseUrl) {
 
 // ── Core replay function ───────────────────────────────────────────────────────
 
-async function replayRecording(browser, rec, opts) {
+async function replayRecording(browser, rec, opts, cliCookies = []) {
   const events   = tryJson(rec.events, []);
   const recorded = tryJson(rec.responses, []);
-  const cookies  = tryJson(rec.cookies, []);
+  const cookies  = mergeCookies(tryJson(rec.cookies, []), cliCookies);
 
   const page = await browser.newPage();
   await page.setViewport(VIEWPORT);
@@ -552,10 +635,16 @@ async function main() {
     process.exit(2);
   }
 
+  const cliCookies = [
+    ...opts.cookies.map(parseCookieArg),
+    ...(opts.cookieFile ? loadCookieFile(opts.cookieFile) : []),
+  ];
+
   console.log(`\n${C.bold}Browser Automation Test Runner${C.reset}`);
   console.log(`Recordings : ${rows.length}`);
   console.log(`Speed      : ${opts.speed}×`);
   if (opts.baseUrl) console.log(`Base URL   : ${opts.baseUrl}`);
+  if (cliCookies.length > 0) console.log(`Cookies    : ${cliCookies.length} (CLI override)`);
   console.log();
 
   let browser;
@@ -587,7 +676,7 @@ async function main() {
         `${rec.name} … `
       );
 
-      const result = await replayRecording(browser, rec, opts);
+      const result = await replayRecording(browser, rec, opts, cliCookies);
       suiteResults.push(result);
 
       if (result.error) {
