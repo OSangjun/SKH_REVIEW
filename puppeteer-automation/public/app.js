@@ -31,14 +31,23 @@
   const cookieApply   = document.getElementById('cookie-apply');
   const ovCancel      = document.getElementById('ov-cancel');
   const overlay       = document.getElementById('replay-overlay');
+  const ovTitle       = document.getElementById('ov-title');
+  const ovSuiteInfo   = document.getElementById('ov-suite-info');
+  const ovSuiteResult = document.getElementById('ov-suite-result');
+  const suiteBtn      = document.getElementById('suite-btn');
 
   // ── State ─────────────────────────────────────────────────────────────────────
   let ws            = null;
   let wsReady       = false;
   let isRecording   = false;
   let isReplaying   = false;
+  let suiteMode     = false;
+  let suitePass     = 0;
+  let suiteFail     = 0;
   let recordings    = [];
   let selectedId    = null;
+  let checkedIds    = new Set();
+  let historyMap    = {};
   let viewport      = { width: 1280, height: 720 };
   let replayingName = '';
 
@@ -126,8 +135,10 @@
         setStatus('녹화된 이벤트가 없습니다.');
         break;
 
-      case 'recordings':
+      case 'recordings': {
         recordings = msg.list || [];
+        const validIds = new Set(recordings.map(r => r.id));
+        for (const id of [...checkedIds]) { if (!validIds.has(id)) checkedIds.delete(id); }
         if (recordings.length > 0 && selectedId === null) {
           selectedId = recordings[recordings.length - 1].id;
           replayBtn.disabled = false;
@@ -136,14 +147,18 @@
           selectedId = null;
           replayBtn.disabled = true;
         }
+        updateSuiteBtn();
         renderList();
         break;
+      }
 
       case 'replay-started':
         isReplaying = true;
-        replayBtn.disabled = true;
-        recordBtn.disabled = true;
-        showOverlay(replayingName, 0, 0);
+        if (!suiteMode) {
+          replayBtn.disabled = true;
+          recordBtn.disabled = true;
+          showOverlay(replayingName, 0, 0);
+        }
         break;
 
       case 'replay-progress':
@@ -152,10 +167,64 @@
 
       case 'replay-done':
         isReplaying = false;
+        if (!suiteMode) {
+          replayBtn.disabled = selectedId === null;
+          recordBtn.disabled = false;
+          hideOverlay();
+          setStatus(`재생 완료 — ${replayingName}`);
+        }
+        break;
+
+      case 'history-all':
+        historyMap = msg.map || {};
+        renderList();
+        break;
+
+      case 'history':
+        if (msg.recordingId != null) {
+          historyMap[msg.recordingId] = msg.runs || [];
+          renderList();
+        }
+        break;
+
+      case 'suite-started':
+        suiteMode  = true;
+        suitePass  = 0;
+        suiteFail  = 0;
+        ovTitle.textContent = '⚡ 스위트 실행 중';
+        ovSuiteInfo.textContent = `0 / ${msg.total}`;
+        ovSuiteInfo.classList.remove('hidden');
+        ovSuiteResult.textContent = '';
+        ovSuiteResult.classList.remove('hidden');
+        overlay.classList.add('visible');
+        replayBtn.disabled = true;
+        recordBtn.disabled = true;
+        suiteBtn.disabled  = true;
+        break;
+
+      case 'suite-item-started':
+        ovName.textContent = msg.name;
+        ovSuiteInfo.textContent = `${msg.index + 1} / ${msg.total}`;
+        ovBar.style.width   = '0%';
+        ovProgress.textContent = '준비 중…';
+        break;
+
+      case 'suite-item-done':
+        if (msg.failed === 0) suitePass++;
+        else suiteFail++;
+        ovSuiteResult.textContent = `✅ ${suitePass}  ❌ ${suiteFail}`;
+        break;
+
+      case 'suite-done':
+        suiteMode = false;
+        overlay.classList.remove('visible');
+        ovTitle.textContent = '▶ 재생 중';
+        ovSuiteInfo.classList.add('hidden');
+        ovSuiteResult.classList.add('hidden');
         replayBtn.disabled = selectedId === null;
         recordBtn.disabled = false;
-        hideOverlay();
-        setStatus(`재생 완료 — ${replayingName}`);
+        updateSuiteBtn();
+        setStatus(`스위트 완료 ${msg.failed === 0 ? '✅' : '❌'} — 성공 ${msg.passed} / 실패 ${msg.failed} (총 ${msg.total}개)`);
         break;
 
       case 'replay-result':
@@ -347,10 +416,41 @@
     setStatus('녹화 삭제됨.');
   }
 
+  // ── Suite button ──────────────────────────────────────────────────────────────
+  function updateSuiteBtn() {
+    const busy = isReplaying || suiteMode;
+    suiteBtn.disabled = recordings.length === 0 || busy;
+    suiteBtn.textContent = checkedIds.size > 0
+      ? `⚡ 스위트 (${checkedIds.size})`
+      : '⚡ 스위트';
+  }
+
+  suiteBtn.addEventListener('click', () => {
+    if (recordings.length === 0) return;
+    const ids = checkedIds.size > 0
+      ? [...checkedIds]
+      : recordings.map(r => r.id);
+    send({ type: 'run-suite', ids, speedFactor: parseFloat(speedSelect.value) });
+  });
+
   // ── Render recording list ─────────────────────────────────────────────────────
   function renderTagChips(tags) {
     if (!Array.isArray(tags) || tags.length === 0) return '';
     return `<div class="rec-tags">${tags.map(t => `<span class="tag-chip">${esc(t)}</span>`).join('')}</div>`;
+  }
+
+  function renderHistoryDots(recId) {
+    const runs = historyMap[recId];
+    if (!Array.isArray(runs) || runs.length === 0) return '';
+    const dots = runs.slice(0, 8).reverse().map(r => {
+      const cls  = r.total === 0 ? 'skip'
+                 : r.failed === 0 ? 'pass'
+                 : r.passed === 0 ? 'fail' : 'partial';
+      const time = r.runAt ? new Date(r.runAt).toLocaleString('ko-KR') : '';
+      const tip  = `${time} | 성공 ${r.passed}/${r.total}${r.durationMs ? '  (' + Math.round(r.durationMs / 1000) + 's)' : ''}`;
+      return `<span class="history-dot ${cls}" title="${esc(tip)}"></span>`;
+    }).join('');
+    return `<div class="history-dots">${dots}</div>`;
   }
 
   function renderList() {
@@ -364,13 +464,17 @@
     recList.innerHTML = recordings
       .slice().reverse()
       .map(rec => {
-        const isSel = rec.id === selectedId;
+        const isSel    = rec.id === selectedId;
+        const isChecked = checkedIds.has(rec.id);
         const tags  = Array.isArray(rec.tags) ? rec.tags : [];
         const desc  = rec.description || '';
         return `
 <div class="rec-item${isSel ? ' selected' : ''}" data-id="${rec.id}">
   <div class="rec-item-head">
-    <span class="rec-num">#${rec.id}</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <input type="checkbox" class="rec-check" data-id="${rec.id}" ${isChecked ? 'checked' : ''} title="스위트에 포함" />
+      <span class="rec-num">#${rec.id}</span>
+    </div>
     <div style="display:flex;gap:4px;align-items:center">
       <button class="rec-edit" data-id="${rec.id}" title="이름/설명/태그 편집">✏️</button>
       <button class="rec-del"  data-id="${rec.id}" title="삭제">✕</button>
@@ -379,6 +483,7 @@
   <div class="rec-name" data-id="${rec.id}">${esc(rec.name)}</div>
   ${desc ? `<div class="rec-desc">${esc(desc)}</div>` : ''}
   ${renderTagChips(tags)}
+  ${renderHistoryDots(rec.id)}
   <span class="rec-url" title="${esc(rec.url)}">${esc(trimUrl(rec.url))}</span>
   <div class="rec-meta">
     <span>${rec.eventCount}개 이벤트</span>
@@ -442,6 +547,7 @@
   }
 
   recList.addEventListener('click', e => {
+    const check   = e.target.closest('.rec-check');
     const del     = e.target.closest('.rec-del');
     const edit    = e.target.closest('.rec-edit');
     const cancel  = e.target.closest('.btn-edit-cancel');
@@ -452,6 +558,14 @@
     const xscript = e.target.closest('.btn-rec-script');
     const item    = e.target.closest('.rec-item');
 
+    if (check)   {
+      e.stopPropagation();
+      const id = +check.dataset.id;
+      if (check.checked) checkedIds.add(id);
+      else checkedIds.delete(id);
+      updateSuiteBtn();
+      return;
+    }
     if (del)     { e.stopPropagation(); deleteRecording(+del.dataset.id);   return; }
     if (edit)    { e.stopPropagation(); openEditForm(+edit.dataset.id);     return; }
     if (cancel)  { e.stopPropagation(); renderList();                        return; }

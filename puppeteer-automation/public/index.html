@@ -59,7 +59,10 @@
     <aside id="rec-panel">
       <div id="rec-panel-header">
         <h2>녹화 목록</h2>
-        <span id="rec-count">0개</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span id="rec-count">0개</span>
+          <button id="suite-btn" class="btn btn-suite" disabled title="선택한 녹화를 순서대로 일괄 실행">⚡ 스위트</button>
+        </div>
       </div>
       <div id="rec-list">
         <p class="empty-msg">아직 녹화가 없습니다.</p>
@@ -71,10 +74,12 @@
   <!-- ── Replay progress overlay ── -->
   <div id="replay-overlay">
     <div class="ov-box">
-      <div class="ov-title">▶ 재생 중</div>
+      <div class="ov-title" id="ov-title">▶ 재생 중</div>
+      <div class="ov-suite-info hidden" id="ov-suite-info"></div>
       <div class="ov-name" id="ov-name"></div>
       <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
       <div class="ov-progress" id="ov-progress">준비 중…</div>
+      <div class="ov-suite-result hidden" id="ov-suite-result"></div>
       <button class="ov-cancel" id="ov-cancel">취소</button>
     </div>
   </div>

@@ -842,3 +842,57 @@ body.log-collapsed #log-body { display: none; }
   font-size: 12px;
 }
 .btn-apply-cookie:hover { background: #1a8fd1; }
+
+/* ── Suite button ────────────────────────────────────────────────────────── */
+.btn-suite {
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  padding: 3px 8px;
+}
+.btn-suite:hover:not(:disabled) { border-color: #f59e0b; color: #f59e0b; }
+
+/* ── Recording checkbox ──────────────────────────────────────────────────── */
+.rec-check {
+  accent-color: var(--accent);
+  cursor: pointer;
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+/* ── Run history dots ────────────────────────────────────────────────────── */
+.history-dots {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 4px;
+  align-items: center;
+}
+.history-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: default;
+}
+.history-dot.pass    { background: var(--replay-color); }
+.history-dot.fail    { background: var(--rec-color); }
+.history-dot.partial { background: #f59e0b; }
+.history-dot.skip    { background: var(--border); }
+
+/* ── Suite overlay elements ──────────────────────────────────────────────── */
+.ov-suite-info {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f59e0b;
+  margin-bottom: 8px;
+}
+.ov-suite-info.hidden  { display: none; }
+.ov-suite-result {
+  font-size: 13px;
+  margin-top: 6px;
+  color: var(--text);
+  letter-spacing: .03em;
+}
+.ov-suite-result.hidden { display: none; }

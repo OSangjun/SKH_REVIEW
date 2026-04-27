@@ -52,6 +52,19 @@ for (const col of [
   `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
 ]) { try { db.exec(col); } catch {} }
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS run_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id INTEGER NOT NULL,
+    run_at       TEXT    NOT NULL,
+    passed       INTEGER NOT NULL DEFAULT 0,
+    failed       INTEGER NOT NULL DEFAULT 0,
+    total        INTEGER NOT NULL DEFAULT 0,
+    results      TEXT    NOT NULL DEFAULT '[]',
+    duration_ms  INTEGER NOT NULL DEFAULT 0
+  )
+`);
+
 const stmts = {
   insertRecording: db.prepare(
     `INSERT INTO recordings (name, url, event_count, created_at, events, responses)
@@ -73,6 +86,19 @@ const stmts = {
   getEvents:     db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
   getResponses:  db.prepare(`SELECT responses FROM recordings WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
+  insertHistory: db.prepare(
+    `INSERT INTO run_history (recording_id, run_at, passed, failed, total, results, duration_ms)
+     VALUES (@recording_id, @run_at, @passed, @failed, @total, @results, @duration_ms)`
+  ),
+  getHistory: db.prepare(
+    `SELECT id, recording_id AS recordingId, run_at AS runAt, passed, failed, total, duration_ms AS durationMs
+     FROM run_history WHERE recording_id = ? ORDER BY id DESC LIMIT 20`
+  ),
+  allHistory: db.prepare(
+    `SELECT id, recording_id AS recordingId, run_at AS runAt, passed, failed, total, duration_ms AS durationMs
+     FROM run_history ORDER BY id DESC`
+  ),
+  deleteHistoryByRecording: db.prepare(`DELETE FROM run_history WHERE recording_id = ?`),
 };
 
 // Migrate from old file-based storage (one-time, then ignored)
@@ -139,6 +165,25 @@ function dbUpdateMeta(id, name, description, tags) {
   stmts.updateMeta.run({ id, name, description, tags: JSON.stringify(tags) });
 }
 function dbDeleteRecording(id) { stmts.deleteRecording.run(id); }
+
+function dbGetHistory(recId) { return stmts.getHistory.all(recId); }
+function dbAllHistory() {
+  const map = {};
+  for (const r of stmts.allHistory.all()) {
+    if (!map[r.recordingId]) map[r.recordingId] = [];
+    if (map[r.recordingId].length < 20) map[r.recordingId].push(r);
+  }
+  return map;
+}
+function dbSaveHistory(recId, passed, failed, total, results, durationMs) {
+  stmts.insertHistory.run({
+    recording_id: recId,
+    run_at:       new Date().toISOString(),
+    passed, failed, total,
+    results:      JSON.stringify(results),
+    duration_ms:  durationMs,
+  });
+}
 
 // ─── Puppeteer session state ──────────────────────────────────────────────────
 
@@ -393,6 +438,7 @@ wss.on('connection', async ws => {
     ws.send(JSON.stringify({ type: 'ready', viewport: VIEWPORT }));
     ws.send(JSON.stringify({ type: 'url-changed', url: currentUrl }));
     ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
+    ws.send(JSON.stringify({ type: 'history-all', map: dbAllHistory() }));
   } catch (err) {
     ws.send(JSON.stringify({ type: 'error', message: err.message }));
     console.error('[WS] Session launch error:', err.message);
@@ -531,7 +577,45 @@ async function handleClientMessage(msg, ws) {
       const events    = dbLoadEvents(msg.id);
       if (!events) break;
       const responses = dbLoadResponses(msg.id);
-      await runReplay(events, responses, meta.url, msg.speedFactor ?? 1.0, ws);
+      await runReplay(msg.id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws);
+      break;
+    }
+
+    // ── Suite (batch replay) ──────────────────────────────────────────────────
+    case 'run-suite': {
+      const ids = Array.isArray(msg.ids) ? msg.ids.filter(x => typeof x === 'number') : [];
+      if (ids.length === 0) break;
+
+      ws.send(JSON.stringify({ type: 'suite-started', total: ids.length }));
+      log('info', `━━ 스위트 실행 시작: ${ids.length}개 테스트 ━━`);
+
+      let suitePass = 0, suiteFail = 0;
+
+      for (let i = 0; i < ids.length; i++) {
+        const id   = ids[i];
+        const meta = dbGetMeta(id);
+        if (!meta) { suiteFail++; continue; }
+        const events    = dbLoadEvents(id);
+        if (!events)  { suiteFail++; continue; }
+        const responses = dbLoadResponses(id);
+
+        ws.send(JSON.stringify({ type: 'suite-item-started', index: i, total: ids.length, name: meta.name }));
+        log('info', `━━ [${i + 1}/${ids.length}] ${meta.name} ━━`);
+
+        const result = await runReplay(id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, true);
+
+        if (result.failed === 0) suitePass++;
+        else suiteFail++;
+
+        ws.send(JSON.stringify({
+          type: 'suite-item-done', index: i, total: ids.length, name: meta.name,
+          passed: result.passed, failed: result.failed, recTotal: result.total,
+        }));
+      }
+
+      log(suiteFail === 0 ? 'success' : 'fail',
+        `━━ 스위트 완료: 성공 ${suitePass} / 실패 ${suiteFail} (총 ${ids.length}개) ━━`);
+      ws.send(JSON.stringify({ type: 'suite-done', total: ids.length, passed: suitePass, failed: suiteFail }));
       break;
     }
 
@@ -546,6 +630,7 @@ async function handleClientMessage(msg, ws) {
 
     // ── Delete ────────────────────────────────────────────────────────────────
     case 'delete-recording': {
+      stmts.deleteHistoryByRecording.run(msg.id);
       dbDeleteRecording(msg.id);
       ws.send(JSON.stringify({ type: 'recordings', list: dbAllMeta() }));
       break;
@@ -660,8 +745,9 @@ function compareResponses(recorded, actual) {
   return results;
 }
 
-async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
-  ws.send(JSON.stringify({ type: 'replay-started' }));
+async function runReplay(recordingId, events, recordedResponses, startUrl, speedFactor, ws, isSuite = false) {
+  const startMs = Date.now();
+  if (!isSuite) ws.send(JSON.stringify({ type: 'replay-started' }));
   log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
 
   const replayResponses    = [];
@@ -801,8 +887,13 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
       log('fail', `  바디 diff: ${d}`);
   }
 
-  ws.send(JSON.stringify({ type: 'replay-done' }));
+  const durationMs = Date.now() - startMs;
+  dbSaveHistory(recordingId, passed, failed, results.length, results, durationMs);
+  ws.send(JSON.stringify({ type: 'history', recordingId, runs: dbGetHistory(recordingId) }));
+
+  if (!isSuite) ws.send(JSON.stringify({ type: 'replay-done' }));
   ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length }));
+  return { passed, failed, total: results.length };
 }
 
 const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
