@@ -1127,6 +1127,24 @@ app.delete('/api/recordings/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── REST API — responses (view & edit) ──────────────────────────────────────
+
+app.get('/api/recordings/:id/responses', (req, res) => {
+  const meta = dbGetMeta(+req.params.id);
+  if (!meta) return res.status(404).json({ error: 'Not found' });
+  res.json(dbLoadResponses(meta.id));
+});
+
+app.put('/api/recordings/:id/responses', (req, res) => {
+  const meta = dbGetMeta(+req.params.id);
+  if (!meta) return res.status(404).json({ error: 'Not found' });
+  const responses = req.body;
+  if (!Array.isArray(responses)) return res.status(400).json({ error: 'Expected array' });
+  db.prepare(`UPDATE recordings SET responses = ? WHERE id = ?`)
+    .run(JSON.stringify(responses), meta.id);
+  res.json({ ok: true });
+});
+
 // ─── REST API — Puppeteer script export ───────────────────────────────────────
 
 app.get('/api/recordings/:id/export/puppeteer', (req, res) => {

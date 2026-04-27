@@ -493,6 +493,7 @@
     <button class="btn-rec-replay" data-id="${rec.id}">▶ 재생</button>
   </div>
   <div class="rec-export">
+    <button class="btn-rec-http"   data-id="${rec.id}" title="HTTP 응답 열람/편집">🌐 HTTP</button>
     <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">📥 JSON</button>
     <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">📜 Script</button>
   </div>
@@ -554,6 +555,7 @@
     const save    = e.target.closest('.btn-edit-save');
     const tagRm   = e.target.closest('.tag-rm');
     const rep     = e.target.closest('.btn-rec-replay');
+    const xhttp   = e.target.closest('.btn-rec-http');
     const xjson   = e.target.closest('.btn-rec-json');
     const xscript = e.target.closest('.btn-rec-script');
     const item    = e.target.closest('.rec-item');
@@ -572,6 +574,7 @@
     if (save)    { e.stopPropagation(); saveEditForm(+save.dataset.id);     return; }
     if (tagRm)   { e.stopPropagation(); tagRm.closest('.tag-chip').remove(); return; }
     if (rep)     { e.stopPropagation(); replayRecording(+rep.dataset.id);   return; }
+    if (xhttp)   { e.stopPropagation(); openRespModal(+xhttp.dataset.id);   return; }
     if (xjson)   { e.stopPropagation(); exportJson(+xjson.dataset.id);      return; }
     if (xscript) { e.stopPropagation(); exportScript(+xscript.dataset.id);  return; }
     if (item && !e.target.closest('.rec-edit-form')) {
@@ -733,6 +736,132 @@
     setStatus(cookies.length > 0
       ? `쿠키 ${cookies.length}개 적용 요청 중…`
       : '쿠키가 없습니다.');
+  });
+
+  // ── HTTP 응답 모달 ────────────────────────────────────────────────────────────
+  const respModal       = document.getElementById('resp-modal');
+  const respModalTitle  = document.getElementById('resp-modal-title');
+  const respList        = document.getElementById('resp-list');
+  const respCountLabel  = document.getElementById('resp-count-label');
+  const respAddBtn      = document.getElementById('resp-add-btn');
+  const respSaveBtn     = document.getElementById('resp-save-btn');
+
+  let respModalId = null;   // recording id currently open in modal
+  let respItems   = [];     // current responses being edited
+
+  function openRespModal(id) {
+    const meta = recordings.find(r => r.id === id);
+    respModalId = id;
+    respModalTitle.textContent = `HTTP 응답 — ${meta ? meta.name : '#' + id}`;
+    respItems = [];
+    respList.innerHTML = '<p class="empty-msg" style="padding:12px">불러오는 중…</p>';
+    respModal.classList.remove('hidden');
+    fetch(`/api/recordings/${id}/responses`)
+      .then(r => r.json())
+      .then(data => {
+        respItems = Array.isArray(data) ? data.map(r => Object.assign({}, r)) : [];
+        renderRespList();
+      })
+      .catch(() => {
+        respList.innerHTML = '<p class="empty-msg" style="padding:12px;color:var(--rec-color)">불러오기 실패</p>';
+      });
+  }
+
+  function renderRespList() {
+    respCountLabel.textContent = `${respItems.length}개 항목`;
+    if (respItems.length === 0) {
+      respList.innerHTML = '<p class="empty-msg" style="padding:12px">녹화된 HTTP 응답이 없습니다.</p>';
+      return;
+    }
+    respList.innerHTML = '';
+    respItems.forEach((item, idx) => {
+      const row = document.createElement('div');
+      row.className = 'resp-row';
+      row.dataset.idx = idx;
+
+      const bodyText = item.body ?? '';
+      let bodyDisplay = '';
+      try {
+        bodyDisplay = JSON.stringify(JSON.parse(bodyText), null, 2);
+      } catch {
+        bodyDisplay = bodyText;
+      }
+
+      row.innerHTML = `
+        <div class="resp-row-head">
+          <span class="resp-status-wrap">
+            <label class="resp-label">상태</label>
+            <input class="resp-status-input" type="number" min="100" max="599"
+              value="${esc(String(item.status ?? 200))}" data-idx="${idx}" />
+          </span>
+          <span class="resp-ct">${esc((item.contentType || '').split(';')[0].trim())}</span>
+          <button class="resp-row-del" data-idx="${idx}" title="항목 삭제">✕</button>
+        </div>
+        <div class="resp-url-wrap" title="${esc(item.url || '')}">
+          <input class="resp-url-input" type="text" value="${esc(item.url || '')}" data-idx="${idx}" placeholder="URL" />
+        </div>
+        <div class="resp-body-wrap">
+          <label class="resp-label">응답 바디</label>
+          <textarea class="resp-body-input" rows="5" data-idx="${idx}" placeholder="(없음)">${esc(bodyDisplay)}</textarea>
+        </div>`;
+      respList.appendChild(row);
+    });
+  }
+
+  respList.addEventListener('input', e => {
+    const statusIn = e.target.closest('.resp-status-input');
+    const urlIn    = e.target.closest('.resp-url-input');
+    const bodyIn   = e.target.closest('.resp-body-input');
+    if (statusIn) { respItems[+statusIn.dataset.idx].status = +statusIn.value; return; }
+    if (urlIn)    { respItems[+urlIn.dataset.idx].url    = urlIn.value; return; }
+    if (bodyIn)   { respItems[+bodyIn.dataset.idx].body  = bodyIn.value; return; }
+  });
+
+  respList.addEventListener('click', e => {
+    const del = e.target.closest('.resp-row-del');
+    if (!del) return;
+    const idx = +del.dataset.idx;
+    respItems.splice(idx, 1);
+    renderRespList();
+  });
+
+  respAddBtn.addEventListener('click', () => {
+    respItems.push({ url: '', status: 200, contentType: 'application/json', body: '' });
+    renderRespList();
+    // Scroll to bottom
+    respList.scrollTop = respList.scrollHeight;
+  });
+
+  respSaveBtn.addEventListener('click', async () => {
+    if (respModalId === null) return;
+    // Normalize body: try to compact JSON, fall back to raw string
+    const toSave = respItems.map(item => {
+      let body = item.body ?? null;
+      if (body !== null && body.trim() === '') body = null;
+      if (body !== null) {
+        try { body = JSON.stringify(JSON.parse(body)); } catch {}
+      }
+      return { ...item, body };
+    });
+    try {
+      const res = await fetch(`/api/recordings/${respModalId}/responses`, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(toSave),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setStatus(`HTTP 응답 저장 완료 — ${toSave.length}개`);
+      respModal.classList.add('hidden');
+    } catch (err) {
+      setStatus('저장 실패: ' + err.message);
+    }
+  });
+
+  document.getElementById('resp-modal-close').addEventListener('click', () => {
+    respModal.classList.add('hidden');
+  });
+  respModal.addEventListener('click', e => {
+    if (e.target === respModal) respModal.classList.add('hidden');
   });
 
   // ── Boot ──────────────────────────────────────────────────────────────────────
