@@ -19,6 +19,10 @@
   const ovBar         = document.getElementById('ov-bar');
   const ovProgress    = document.getElementById('ov-progress');
   const resultBadge   = document.getElementById('result-badge');
+  const logLines      = document.getElementById('log-lines');
+  const logHeader     = document.getElementById('log-header');
+  const logBadge      = document.getElementById('log-badge');
+  const logClearBtn   = document.getElementById('log-clear-btn');
   const cookieBtn     = document.getElementById('cookie-btn');
   const cookieModal   = document.getElementById('cookie-modal');
   const cookieTbody   = document.getElementById('cookie-tbody');
@@ -158,12 +162,17 @@
         showReplayResult(msg);
         break;
 
+      case 'log':
+        appendLog(msg.level, msg.ts, msg.message);
+        break;
+
       case 'cookies-applied':
         setStatus(`쿠키 적용 완료 — ${msg.count}개`);
         break;
 
       case 'error':
         setStatus('오류: ' + (msg.message || '알 수 없는 오류'));
+        appendLog('fail', null, '오류: ' + (msg.message || ''));
         break;
     }
   }
@@ -412,6 +421,50 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // ── Log panel ─────────────────────────────────────────────────────────────────
+  const MAX_LOG_LINES = 500;
+  let lastLogLevel = 'info';
+
+  function appendLog(level, ts, message) {
+    lastLogLevel = level;
+
+    const line = document.createElement('div');
+    line.className = `log-line ${level}`;
+    line.innerHTML =
+      `<span class="log-ts">${esc(ts ?? new Date().toLocaleTimeString('ko-KR', { hour12: false }))}</span>` +
+      `<span class="log-msg">${esc(message)}</span>`;
+
+    logLines.appendChild(line);
+
+    // Trim old lines
+    while (logLines.childElementCount > MAX_LOG_LINES)
+      logLines.removeChild(logLines.firstChild);
+
+    // Auto-scroll if not manually scrolled up
+    const body = logLines.parentElement;
+    if (body.scrollHeight - body.scrollTop - body.clientHeight < 40)
+      body.scrollTop = body.scrollHeight;
+  }
+
+  function updateLogBadge(level) {
+    logBadge.className = `log-badge ${level}`;
+    const labels = { success: 'SUCCESS', fail: 'FAIL', warn: 'PARTIAL' };
+    logBadge.textContent = labels[level] ?? '';
+  }
+
+  // Toggle collapse
+  logHeader.addEventListener('click', e => {
+    if (e.target === logClearBtn) return;
+    document.body.classList.toggle('log-collapsed');
+  });
+
+  logClearBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    logLines.innerHTML = '';
+    logBadge.className = 'log-badge';
+    logBadge.textContent = '';
+  });
+
   // ── Replay result badge ───────────────────────────────────────────────────────
   function showReplayResult({ results, passed, failed, total }) {
     resultBadge.className = 'result-badge';
@@ -438,6 +491,8 @@
 
     resultBadge.classList.add(cls);
     resultBadge.innerHTML = `<span class="rb-icon">${icon}</span><span>${text}</span>`;
+
+    updateLogBadge(cls);
 
     // Auto-hide after 15s
     clearTimeout(resultBadge._timer);

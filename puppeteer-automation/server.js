@@ -325,6 +325,13 @@ function send(msg) {
     activeWs.send(JSON.stringify(msg));
 }
 
+// level: 'info' | 'success' | 'fail' | 'warn'
+function log(level, message) {
+  const ts = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  send({ type: 'log', level, message, ts });
+  console.log(`[${ts}] [${level.toUpperCase()}] ${message}`);
+}
+
 // ─── Client message dispatcher ────────────────────────────────────────────────
 
 async function handleClientMessage(msg, ws) {
@@ -488,18 +495,38 @@ function compareResponses(recorded, actual) {
 
 async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
   ws.send(JSON.stringify({ type: 'replay-started' }));
+  log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
 
   const replayResponses = [];
   const onResponse = response => {
-    const url = response.url();
+    const url    = response.url();
+    const status = response.status();
     if (url.startsWith('data:') || url.startsWith('blob:')) return;
-    replayResponses.push({ url, status: response.status() });
+    replayResponses.push({ url, status });
+
+    // Live-log each response during replay
+    const key      = normalizeUrl(url);
+    const recMap   = buildResponseMap(recordedResponses);
+    const expected = recMap.get(key);
+    if (expected) {
+      const pass = expected.includes(status);
+      const short = url.length > 80 ? url.slice(0, 77) + '…' : url;
+      if (pass)
+        log('success', `[HTTP ${status}] ✓ ${short}`);
+      else
+        log('fail',    `[HTTP ${status}] ✗ ${short}  (기대: ${expected[0]})`);
+    }
   };
   activePage.on('response', onResponse);
 
   try {
     firstNavigateDone = false;
-    if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
+    if (sessionCookies.length > 0) {
+      await activePage.setCookie(...sessionCookies);
+      log('info', `쿠키 ${sessionCookies.length}개 적용`);
+    }
+
+    log('info', `페이지 로드: ${startUrl}`);
     await activePage.goto(startUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
     const total = events.length;
@@ -511,6 +538,21 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
       if (delay > 0) await sleep(delay);
       lastT = ev.t ?? 0;
 
+      // Log significant actions
+      switch (ev.type) {
+        case 'navigate':
+          log('info',  `[Navigate] ${ev.url}`); break;
+        case 'click':
+          log('info',  `[Click] (${ev.x}, ${ev.y})  button=${ev.button ?? 'left'}`); break;
+        case 'dblclick':
+          log('info',  `[DblClick] (${ev.x}, ${ev.y})`); break;
+        case 'keydown':
+          if (ev.key === 'Enter') log('info', `[Enter] 폼 제출 또는 키 입력`);
+          break;
+        case 'input':
+          log('info',  `[Input] "${String(ev.value ?? '').slice(0, 40)}"`); break;
+      }
+
       await dispatchReplayEvent(ev);
 
       if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
@@ -520,11 +562,13 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
       if (i % 5 === 0 || i === total - 1)
         ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
     }
+  } catch (err) {
+    log('fail', `재생 오류: ${err.message}`);
   } finally {
     activePage.off('response', onResponse);
   }
 
-  // Compare recorded vs actual responses and send result
+  // Compare recorded vs actual responses
   const results = recordedResponses.length > 0
     ? compareResponses(recordedResponses, replayResponses)
     : [];
@@ -532,9 +576,19 @@ async function runReplay(events, recordedResponses, startUrl, speedFactor, ws) {
   const passed = results.filter(r => r.pass).length;
   const failed = results.filter(r => !r.pass).length;
 
+  if (results.length > 0) {
+    if (failed === 0)
+      log('success', `━━ 결과: SUCCESS — ${passed}/${results.length} 응답 일치 ━━`);
+    else if (passed === 0)
+      log('fail',    `━━ 결과: FAIL — ${failed}/${results.length} 응답 불일치 ━━`);
+    else
+      log('warn',    `━━ 결과: PARTIAL — 성공 ${passed} / 실패 ${failed} ━━`);
+  } else {
+    log('info', '━━ 재생 완료 (응답 비교 없음) ━━');
+  }
+
   ws.send(JSON.stringify({ type: 'replay-done' }));
   ws.send(JSON.stringify({ type: 'replay-result', results, passed, failed, total: results.length }));
-  console.log(`[Replay] Done — responses: ${passed} pass / ${failed} fail`);
 }
 
 const BTN = b => (b === 'right' ? 'right' : b === 'middle' ? 'middle' : 'left');
