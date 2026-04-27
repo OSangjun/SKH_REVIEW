@@ -83,6 +83,14 @@ function parseArgs() {
         process.exit(2);
     }
   }
+  if (opts.speed <= 0 || !isFinite(opts.speed)) {
+    console.error(`${C.red}Error:${C.reset} --speed must be a positive number (got ${opts.speed})`);
+    process.exit(2);
+  }
+  if (opts.timeout <= 0 || !Number.isInteger(opts.timeout)) {
+    console.error(`${C.red}Error:${C.reset} --timeout must be a positive integer ms value (got ${opts.timeout})`);
+    process.exit(2);
+  }
   return opts;
 }
 
@@ -141,13 +149,43 @@ ${C.bold}Examples:${C.reset}
 // ── Database helpers ───────────────────────────────────────────────────────────
 
 function openDb() {
-  if (!fs.existsSync(DB_PATH)) {
-    console.error(`${C.red}Error:${C.reset} DB not found at ${DB_PATH}`);
-    console.error('  Start the server at least once to initialise the database.');
-    process.exit(2);
-  }
-  const db = new Database(DB_PATH, { readonly: true });
+  const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
+
+  // Full schema — idempotent on an existing DB
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS recordings (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      url         TEXT    NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT    NOT NULL,
+      events      TEXT    NOT NULL DEFAULT '[]'
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_history (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      recording_id INTEGER NOT NULL,
+      run_at       TEXT    NOT NULL,
+      passed       INTEGER NOT NULL DEFAULT 0,
+      failed       INTEGER NOT NULL DEFAULT 0,
+      total        INTEGER NOT NULL DEFAULT 0,
+      results      TEXT    NOT NULL DEFAULT '[]',
+      duration_ms  INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+
+  // Safe column migrations — silently ignored if column already exists
+  for (const col of [
+    `ALTER TABLE recordings ADD COLUMN responses   TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN cookies     TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN toasts      TEXT NOT NULL DEFAULT '[]'`,
+  ]) { try { db.exec(col); } catch {} }
+
   return db;
 }
 
@@ -861,6 +899,8 @@ async function main() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--ignore-certificate-errors',       // allow self-signed / internal TLS
+        '--allow-running-insecure-content',
       ],
       defaultViewport: VIEWPORT,
     });
