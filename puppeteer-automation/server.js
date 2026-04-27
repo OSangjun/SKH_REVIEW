@@ -122,6 +122,7 @@ let capturedEvents     = [];
 let recordingStartTime = null;
 let currentUrl         = 'about:blank';
 let firstNavigateDone  = false; // suppress navigate event on very first load
+let sessionCookies     = [];    // cookies applied on every navigation
 
 // ─── Capture script (injected via evaluateOnNewDocument) ─────────────────────
 // This runs in EVERY page context regardless of how navigation happened
@@ -318,7 +319,19 @@ async function handleClientMessage(msg, ws) {
     // ── Navigation ───────────────────────────────────────────────────────────
     case 'navigate': {
       firstNavigateDone = false;
+      if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
       await activePage.goto(msg.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      break;
+    }
+
+    // ── Cookie management ────────────────────────────────────────────────────
+    case 'set-cookies': {
+      sessionCookies = (msg.cookies ?? []).filter(c => c.name && c.value);
+      if (sessionCookies.length > 0) {
+        await activePage.setCookie(...sessionCookies);
+        console.log(`[Cookies] Set ${sessionCookies.length} cookie(s)`);
+      }
+      ws.send(JSON.stringify({ type: 'cookies-applied', count: sessionCookies.length }));
       break;
     }
 
@@ -408,24 +421,42 @@ async function handleClientMessage(msg, ws) {
 
 // ─── Replay engine ────────────────────────────────────────────────────────────
 
+// Wait until network goes idle (≤2 concurrent requests for idleTime ms).
+// Silently absorbs timeout — some pages keep persistent connections.
+async function waitNetworkIdle(timeout = 5000) {
+  try {
+    await activePage.waitForNetworkIdle({ idleTime: 500, timeout });
+  } catch {}
+}
+
+// Events that typically trigger network requests and warrant idle-waiting
+const NETWORK_EVENTS = new Set(['navigate', 'click', 'dblclick']);
+
 async function runReplay(events, startUrl, speedFactor, ws) {
   ws.send(JSON.stringify({ type: 'replay-started' }));
 
-  // Navigate to the recording's starting URL
   firstNavigateDone = false;
-  await activePage.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await sleep(300);
+  if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
+  await activePage.goto(startUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
   const total = events.length;
   let lastT   = 0;
 
   for (let i = 0; i < total; i++) {
     const ev    = events[i];
+    // Preserve original inter-event timing (scaled by speedFactor)
     const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
     if (delay > 0) await sleep(delay);
     lastT = ev.t ?? 0;
 
     await dispatchReplayEvent(ev);
+
+    // After events that may trigger XHR / navigation, wait for network to settle
+    if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
+
+    // Enter key may submit a form → wait for network
+    if (ev.type === 'keydown' && (ev.key === 'Enter' || ev.code === 'Enter'))
+      await waitNetworkIdle(5000);
 
     if (i % 5 === 0 || i === total - 1)
       ws.send(JSON.stringify({ type: 'replay-progress', done: i + 1, total }));
@@ -441,7 +472,8 @@ async function dispatchReplayEvent(ev) {
   try {
     switch (ev.type) {
       case 'navigate':
-        await activePage.goto(ev.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
+        await activePage.goto(ev.url, { waitUntil: 'networkidle2', timeout: 30000 });
         break;
       case 'click':
         await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });

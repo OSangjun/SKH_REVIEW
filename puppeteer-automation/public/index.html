@@ -17,6 +17,7 @@
     </div>
 
     <div id="controls">
+      <button id="cookie-btn" class="btn btn-cookie" title="쿠키 설정">🍪 쿠키</button>
       <button id="record-btn" class="btn btn-record" disabled>
         <span class="dot"></span> 녹화
       </button>
@@ -74,6 +75,40 @@
       <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
       <div class="ov-progress" id="ov-progress">준비 중…</div>
       <button class="ov-cancel" id="ov-cancel">취소</button>
+    </div>
+  </div>
+
+  <!-- ── Cookie settings modal ── -->
+  <div id="cookie-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>🍪 쿠키 설정</h3>
+        <button id="cookie-modal-close" class="modal-close">✕</button>
+      </div>
+      <p class="modal-desc">이동 전에 브라우저에 주입할 쿠키를 입력하세요. <code>domain</code>을 비워두면 현재 URL의 도메인이 사용됩니다.</p>
+      <div class="cookie-table-wrap">
+        <table id="cookie-table">
+          <thead>
+            <tr>
+              <th>name</th>
+              <th>value</th>
+              <th>domain</th>
+              <th>path</th>
+              <th>secure</th>
+              <th>httpOnly</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="cookie-tbody"></tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <button id="cookie-add-row" class="btn btn-add-row">+ 행 추가</button>
+        <div style="display:flex;gap:8px">
+          <button id="cookie-clear" class="btn btn-clear-cookie">전체 삭제</button>
+          <button id="cookie-apply" class="btn btn-apply-cookie">적용</button>
+        </div>
+      </div>
     </div>
   </div>
 

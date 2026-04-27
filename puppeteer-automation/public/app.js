@@ -18,6 +18,12 @@
   const ovName        = document.getElementById('ov-name');
   const ovBar         = document.getElementById('ov-bar');
   const ovProgress    = document.getElementById('ov-progress');
+  const cookieBtn     = document.getElementById('cookie-btn');
+  const cookieModal   = document.getElementById('cookie-modal');
+  const cookieTbody   = document.getElementById('cookie-tbody');
+  const cookieAddRow  = document.getElementById('cookie-add-row');
+  const cookieClear   = document.getElementById('cookie-clear');
+  const cookieApply   = document.getElementById('cookie-apply');
   const ovCancel      = document.getElementById('ov-cancel');
   const overlay       = document.getElementById('replay-overlay');
 
@@ -145,6 +151,10 @@
         recordBtn.disabled = false;
         hideOverlay();
         setStatus(`재생 완료 — ${replayingName}`);
+        break;
+
+      case 'cookies-applied':
+        setStatus(`쿠키 적용 완료 — ${msg.count}개`);
         break;
 
       case 'error':
@@ -396,6 +406,63 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+
+  // ── Cookie popup ──────────────────────────────────────────────────────────────
+  function makeCookieRow(name = '', value = '', domain = '', path = '/', secure = false, httpOnly = false) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input class="cookie-input" data-field="name"     value="${esc(name)}"     placeholder="session_id" /></td>
+      <td><input class="cookie-input" data-field="value"    value="${esc(value)}"    placeholder="abc123" /></td>
+      <td><input class="cookie-input" data-field="domain"   value="${esc(domain)}"   placeholder="(현재 도메인)" /></td>
+      <td><input class="cookie-input" data-field="path"     value="${esc(path)}"     placeholder="/" style="width:60px" /></td>
+      <td style="text-align:center"><input type="checkbox" class="cookie-check" data-field="secure"   ${secure   ? 'checked' : ''} /></td>
+      <td style="text-align:center"><input type="checkbox" class="cookie-check" data-field="httpOnly" ${httpOnly ? 'checked' : ''} /></td>
+      <td><button class="cookie-row-del" title="삭제">✕</button></td>`;
+    tr.querySelector('.cookie-row-del').addEventListener('click', () => tr.remove());
+    return tr;
+  }
+
+  function readCookieRows() {
+    return Array.from(cookieTbody.querySelectorAll('tr')).map(tr => {
+      const g = f => tr.querySelector(`[data-field="${f}"]`);
+      const domain = g('domain').value.trim();
+      const obj = {
+        name:     g('name').value.trim(),
+        value:    g('value').value.trim(),
+        path:     g('path').value.trim() || '/',
+        secure:   g('secure').checked,
+        httpOnly: g('httpOnly').checked,
+      };
+      if (domain) obj.domain = domain;
+      return obj;
+    }).filter(c => c.name && c.value);
+  }
+
+  cookieBtn.addEventListener('click', () => {
+    cookieModal.classList.remove('hidden');
+  });
+  document.getElementById('cookie-modal-close').addEventListener('click', () => {
+    cookieModal.classList.add('hidden');
+  });
+  cookieModal.addEventListener('click', e => {
+    if (e.target === cookieModal) cookieModal.classList.add('hidden');
+  });
+  cookieAddRow.addEventListener('click', () => {
+    cookieTbody.appendChild(makeCookieRow());
+  });
+  cookieClear.addEventListener('click', () => {
+    cookieTbody.innerHTML = '';
+    cookieBtn.classList.remove('has-cookies');
+  });
+  cookieApply.addEventListener('click', () => {
+    const cookies = readCookieRows();
+    send({ type: 'set-cookies', cookies });
+    cookieBtn.classList.toggle('has-cookies', cookies.length > 0);
+    cookieModal.classList.add('hidden');
+    setStatus(cookies.length > 0
+      ? `쿠키 ${cookies.length}개 적용 요청 중…`
+      : '쿠키가 없습니다.');
+  });
 
   // ── Boot ──────────────────────────────────────────────────────────────────────
   canvas.width  = viewport.width;
