@@ -13,7 +13,7 @@ const CHROME_PATH =
   '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 
 const PORT     = process.env.PORT || 3000;
-const VIEWPORT = { width: 1280, height: 720 };
+const VIEWPORT = { width: 1920, height: 1080 };
 
 // ─── HTTP + WebSocket server setup ───────────────────────────────────────────
 
