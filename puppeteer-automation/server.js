@@ -753,6 +753,8 @@ async function waitNetworkIdle(timeout = 5000) {
 
 // Events that typically trigger network requests and warrant idle-waiting
 const NETWORK_EVENTS = new Set(['navigate', 'click', 'dblclick']);
+// Events that never cause HTTP requests — replayed without timing delay
+const NO_DELAY_EVENTS = new Set(['keydown', 'keyup', 'input', 'scroll', 'wheel', 'contenteditable']);
 
 // Build a lookup map: normalizedUrl → [recorded response objects]
 function buildResponseMap(responses) {
@@ -918,7 +920,9 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
 
     for (let i = 0; i < total; i++) {
       const ev    = events[i];
-      const delay = Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
+      const delay = NO_DELAY_EVENTS.has(ev.type)
+        ? 0
+        : Math.max(0, ((ev.t ?? 0) - lastT) / speedFactor);
       if (delay > 0) await sleep(delay);
       lastT = ev.t ?? 0;
 

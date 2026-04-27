@@ -27,7 +27,8 @@ const CHROME_PATH = process.env.CHROME_PATH
   || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome';
 const VIEWPORT      = { width: 1920, height: 1080 };
 const DB_PATH       = path.join(__dirname, 'recordings.db');
-const NETWORK_EVTS  = new Set(['navigate', 'click', 'dblclick']);
+const NETWORK_EVTS   = new Set(['navigate', 'click', 'dblclick']);
+const NO_DELAY_EVTS  = new Set(['keydown', 'keyup', 'input', 'scroll', 'wheel', 'contenteditable']);
 
 // ── ANSI colors (auto-disabled if not a TTY) ──────────────────────────────────
 
@@ -533,7 +534,9 @@ async function replayRecording(browser, rec, opts, cliCookies = []) {
 
     let lastT = 0;
     for (const ev of events) {
-      const delay = Math.max(0, ((ev.t ?? 0) - lastT) / opts.speed);
+      const delay = NO_DELAY_EVTS.has(ev.type)
+        ? 0
+        : Math.max(0, ((ev.t ?? 0) - lastT) / opts.speed);
       if (delay > 0) await sleep(delay);
       lastT = ev.t ?? 0;
 
