@@ -50,6 +50,7 @@ for (const col of [
   `ALTER TABLE recordings ADD COLUMN responses   TEXT NOT NULL DEFAULT '[]'`,
   `ALTER TABLE recordings ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
+  `ALTER TABLE recordings ADD COLUMN cookies     TEXT NOT NULL DEFAULT '[]'`,
 ]) { try { db.exec(col); } catch {} }
 
 db.exec(`
@@ -67,8 +68,8 @@ db.exec(`
 
 const stmts = {
   insertRecording: db.prepare(
-    `INSERT INTO recordings (name, url, event_count, created_at, events, responses)
-     VALUES (@name, @url, @event_count, @created_at, @events, @responses)`
+    `INSERT INTO recordings (name, url, event_count, created_at, events, responses, cookies)
+     VALUES (@name, @url, @event_count, @created_at, @events, @responses, @cookies)`
   ),
   updateMeta: db.prepare(
     `UPDATE recordings SET name=@name, description=@description, tags=@tags WHERE id=@id`
@@ -85,6 +86,7 @@ const stmts = {
   ),
   getEvents:     db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
   getResponses:  db.prepare(`SELECT responses FROM recordings WHERE id = ?`),
+  getCookies:    db.prepare(`SELECT cookies   FROM recordings WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
   insertHistory: db.prepare(
     `INSERT INTO run_history (recording_id, run_at, passed, failed, total, results, duration_ms)
@@ -151,15 +153,21 @@ function dbLoadResponses(id) {
   if (!row) return [];
   return tryJson(row.responses, []);
 }
-function dbSaveRecording(name, url, eventCount, createdAt, events, responses) {
+function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies) {
   const info = stmts.insertRecording.run({
     name, url,
     event_count: eventCount,
     created_at:  createdAt,
     events:      JSON.stringify(events),
     responses:   JSON.stringify(responses),
+    cookies:     JSON.stringify(cookies ?? []),
   });
   return info.lastInsertRowid;
+}
+function dbLoadCookies(id) {
+  const row = stmts.getCookies.get(id);
+  if (!row) return [];
+  return tryJson(row.cookies, []);
 }
 function dbUpdateMeta(id, name, description, tags) {
   stmts.updateMeta.run({ id, name, description, tags: JSON.stringify(tags) });
@@ -199,7 +207,8 @@ let pendingRespPromises   = new Set(); // in-flight body reads
 let recordingStartTime    = null;
 let currentUrl         = 'about:blank';
 let firstNavigateDone  = false; // suppress navigate event on very first load
-let sessionCookies     = [];    // cookies applied on every navigation
+let sessionCookies     = [];    // cookies set by user via UI
+let replayCookies      = [];    // effective cookies for current replay (recording's saved cookies)
 
 // ─── Capture script (injected via evaluateOnNewDocument) ─────────────────────
 // This runs in EVERY page context regardless of how navigation happened
@@ -213,72 +222,21 @@ function buildCaptureScript() {
     const cap = window.__captureEvent;
     if (!cap) return;
 
-    const MOVE_THROTTLE   = 50;
     const SCROLL_THROTTLE = 100;
-    let lastMove = 0, lastScroll = 0;
+    let lastScroll = 0;
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
-    // Build a stable CSS selector for an element.
-    // Priority: data-testid / id / aria-label → CSS path (max 4 levels)
-    function getSelector(el) {
-      if (!el || el.nodeType !== 1) return '';
-      // Stable test attributes
-      for (const attr of ['data-testid','data-test','data-cy','data-qa','data-id']) {
-        const v = el.getAttribute(attr);
-        if (v) return '[' + attr + '=' + JSON.stringify(v) + ']';
-      }
-      // ID
-      if (el.id) {
-        try { return '#' + CSS.escape(el.id); } catch { return '#' + el.id; }
-      }
-      // aria-label (buttons / links)
-      const label = el.getAttribute('aria-label');
-      if (label && (el.tagName === 'BUTTON' || el.tagName === 'A'))
-        return el.tagName.toLowerCase() + '[aria-label=' + JSON.stringify(label) + ']';
-      // CSS path — walk up max 4 ancestors
-      const parts = [];
-      let cur = el;
-      for (let d = 0; d < 4 && cur && cur.tagName && cur !== document.documentElement; d++) {
-        if (cur.id) {
-          try { parts.unshift('#' + CSS.escape(cur.id)); } catch { parts.unshift('#' + cur.id); }
-          break;
-        }
-        let part = cur.tagName.toLowerCase();
-        const sibs = cur.parentElement
-          ? Array.from(cur.parentElement.children).filter(c => c.tagName === cur.tagName)
-          : [];
-        if (sibs.length > 1) part += ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')';
-        parts.unshift(part);
-        cur = cur.parentElement;
-      }
-      return parts.join(' > ');
-    }
-
-    function elText(el) {
-      return (el.getAttribute('aria-label') || el.textContent || el.value || '')
-        .trim().replace(/\\s+/g, ' ').slice(0, 60);
-    }
-
     document.addEventListener('click', e => {
-      const sel = getSelector(e.target);
-      cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button),
-                     selector: sel, text: elText(e.target) });
+      cap('click', { x: e.clientX, y: e.clientY, button: btn(e.button) });
     }, true);
     document.addEventListener('dblclick', e => {
-      cap('dblclick', { x: e.clientX, y: e.clientY, selector: getSelector(e.target) });
+      cap('dblclick', { x: e.clientX, y: e.clientY });
     }, true);
     document.addEventListener('mousedown',
       e => cap('mousedown', { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
     document.addEventListener('mouseup',
       e => cap('mouseup',   { x: e.clientX, y: e.clientY, button: btn(e.button) }), true);
-
-    document.addEventListener('mousemove', e => {
-      const now = Date.now();
-      if (now - lastMove < MOVE_THROTTLE) return;
-      lastMove = now;
-      cap('mousemove', { x: e.clientX, y: e.clientY });
-    }, true);
 
     document.addEventListener('wheel',
       e => cap('wheel', { x: e.clientX, y: e.clientY, deltaX: e.deltaX, deltaY: e.deltaY }),
@@ -303,16 +261,15 @@ function buildCaptureScript() {
       const el = e.target;
       if (!el) return;
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        cap('input', { value: el.value, selector: getSelector(el) });
+        cap('input', { value: el.value });
       } else if (el.isContentEditable) {
-        cap('contenteditable', { html: el.innerHTML, text: el.innerText,
-                                 selector: getSelector(el) });
+        cap('contenteditable', { html: el.innerHTML, text: el.innerText });
       }
     }, true);
 
     document.addEventListener('change', e => {
       if (e.target && e.target.tagName === 'SELECT')
-        cap('select', { value: e.target.value, selector: getSelector(e.target) });
+        cap('select', { value: e.target.value });
     }, true);
   })();`;
 }
@@ -559,6 +516,7 @@ async function handleClientMessage(msg, ws) {
         createdAt,
         [...capturedEvents],
         [...capturedResponses],
+        [...sessionCookies],
       );
       // Update name to reflect actual auto-increment id
       db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`)
@@ -577,7 +535,8 @@ async function handleClientMessage(msg, ws) {
       const events    = dbLoadEvents(msg.id);
       if (!events) break;
       const responses = dbLoadResponses(msg.id);
-      await runReplay(msg.id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws);
+      const cookies   = dbLoadCookies(msg.id);
+      await runReplay(msg.id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, false, cookies);
       break;
     }
 
@@ -598,11 +557,12 @@ async function handleClientMessage(msg, ws) {
         const events    = dbLoadEvents(id);
         if (!events)  { suiteFail++; continue; }
         const responses = dbLoadResponses(id);
+        const cookies   = dbLoadCookies(id);
 
         ws.send(JSON.stringify({ type: 'suite-item-started', index: i, total: ids.length, name: meta.name }));
         log('info', `━━ [${i + 1}/${ids.length}] ${meta.name} ━━`);
 
-        const result = await runReplay(id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, true);
+        const result = await runReplay(id, events, responses, meta.url, msg.speedFactor ?? 1.0, ws, true, cookies);
 
         if (result.failed === 0) suitePass++;
         else suiteFail++;
@@ -704,13 +664,16 @@ function jsonDiff(expected, actual, path) {
 
 function compareResponses(recorded, actual) {
   const recMap  = buildResponseMap(recorded);
-  const results = [];
 
-  for (const r of actual) {
-    const key      = normalizeUrl(r.url);
-    const recList  = recMap.get(key);
-    if (!recList) continue;           // URL not in recording — skip
-    const rec = recList[0];           // compare against first recorded hit
+  // Deduplicate actual responses: keep only the last occurrence per normalized URL
+  const actMap = new Map();
+  for (const r of actual) actMap.set(normalizeUrl(r.url), r);
+
+  const results = [];
+  for (const [key, r] of actMap) {
+    const recList = recMap.get(key);
+    if (!recList) continue;
+    const rec = recList[0];
 
     const statusPass = rec.status === r.status;
 
@@ -745,7 +708,7 @@ function compareResponses(recorded, actual) {
   return results;
 }
 
-async function runReplay(recordingId, events, recordedResponses, startUrl, speedFactor, ws, isSuite = false) {
+async function runReplay(recordingId, events, recordedResponses, startUrl, speedFactor, ws, isSuite = false, recordingCookies = []) {
   const startMs = Date.now();
   if (!isSuite) ws.send(JSON.stringify({ type: 'replay-started' }));
   log('info', `재생 시작 → ${startUrl}  (이벤트 ${events.length}개, 속도 ${speedFactor}×)`);
@@ -757,21 +720,12 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
   const onResponse = response => {
     const url = response.url();
     if (url.startsWith('data:') || url.startsWith('blob:')) return;
-    const ct     = (response.headers()['content-type'] || '').toLowerCase();
-    const status = response.status();
+    const ct       = (response.headers()['content-type'] || '').toLowerCase();
+    const status   = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
-
-    const key      = normalizeUrl(url);
-    const recList  = recMap.get(key);
-    const short    = url.length > 80 ? url.slice(0, 77) + '…' : url;
 
     if (!wantBody) {
       replayResponses.push({ url, status, contentType: ct, body: null });
-      if (recList) {
-        const pass = recList[0].status === status;
-        log(pass ? 'success' : 'fail',
-          `[HTTP ${status}] ${pass ? '✓' : '✗'} ${short}${pass ? '' : `  (기대: ${recList[0].status})`}`);
-      }
       return;
     }
 
@@ -779,26 +733,6 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
       .then(buf => {
         const body = buf.length <= 51200 ? buf.toString('utf8') : null;
         replayResponses.push({ url, status, contentType: ct, body });
-
-        if (recList) {
-          const rec       = recList[0];
-          const statusOk  = rec.status === status;
-          let bodyOk      = true;
-          let diffSummary = '';
-          if (rec.body !== null && body !== null) {
-            try {
-              const diffs = jsonDiff(JSON.parse(rec.body), JSON.parse(body));
-              bodyOk      = diffs.length === 0;
-              if (!bodyOk) diffSummary = '  ' + diffs[0];
-            } catch {
-              bodyOk      = rec.body === body;
-              if (!bodyOk) diffSummary = '  바디 텍스트 불일치';
-            }
-          }
-          const pass = statusOk && bodyOk;
-          log(pass ? 'success' : 'fail',
-            `[HTTP ${status}] ${pass ? '✓' : '✗'} ${short}${diffSummary}`);
-        }
       })
       .catch(() => replayResponses.push({ url, status, contentType: ct, body: null }))
       .finally(() => replayRespPending.delete(p));
@@ -809,9 +743,10 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
 
   try {
     firstNavigateDone = false;
-    if (sessionCookies.length > 0) {
-      await activePage.setCookie(...sessionCookies);
-      log('info', `쿠키 ${sessionCookies.length}개 적용`);
+    replayCookies = recordingCookies.length > 0 ? recordingCookies : sessionCookies;
+    if (replayCookies.length > 0) {
+      await activePage.setCookie(...replayCookies);
+      log('info', `쿠키 ${replayCookies.length}개 적용${recordingCookies.length > 0 ? ' (녹화 저장 쿠키)' : ''}`);
     }
 
     log('info', `페이지 로드: ${startUrl}`);
@@ -831,9 +766,9 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
         case 'navigate':
           log('info',  `[Navigate] ${ev.url}`); break;
         case 'click':
-          log('info',  `[Click] ${ev.selector || `(${ev.x},${ev.y})`}${ev.text ? '  "' + ev.text + '"' : ''}`); break;
+          log('info',  `[Click] (${ev.x},${ev.y})`); break;
         case 'dblclick':
-          log('info',  `[DblClick] ${ev.selector || `(${ev.x},${ev.y})`}`); break;
+          log('info',  `[DblClick] (${ev.x},${ev.y})`); break;
         case 'keydown':
           if (ev.key === 'Enter') log('info', `[Enter] 폼 제출 또는 키 입력`);
           break;
@@ -874,17 +809,22 @@ async function runReplay(recordingId, events, recordedResponses, startUrl, speed
       log('fail',    `━━ 결과: FAIL — ${failed}/${results.length} 응답 불일치 ━━`);
     else
       log('warn',    `━━ 결과: PARTIAL — 성공 ${passed} / 실패 ${failed} ━━`);
+
+    // Per-URL result log
+    for (const r of results) {
+      const short = r.url.length > 80 ? r.url.slice(0, 77) + '…' : r.url;
+      if (r.pass) {
+        log('success', `  ✓ [${r.actualStatus}] ${short}`);
+      } else {
+        log('fail', `  ✗ [${r.actualStatus}] ${short}`);
+        if (!r.statusPass)
+          log('fail', `    상태코드: ${r.expectedStatus} → ${r.actualStatus}`);
+        for (const d of r.bodyDiffs.slice(0, 3))
+          log('fail', `    바디 diff: ${d}`);
+      }
+    }
   } else {
     log('info', '━━ 재생 완료 (응답 비교 없음) ━━');
-  }
-
-  // Log body diffs for failures
-  for (const r of results.filter(x => !x.pass)) {
-    const short = r.url.length > 70 ? r.url.slice(0, 67) + '…' : r.url;
-    if (!r.statusPass)
-      log('fail', `  상태코드 불일치 ${short}: ${r.expectedStatus} → ${r.actualStatus}`);
-    for (const d of r.bodyDiffs.slice(0, 3))
-      log('fail', `  바디 diff: ${d}`);
   }
 
   const durationMs = Date.now() - startMs;
@@ -902,31 +842,15 @@ async function dispatchReplayEvent(ev) {
   try {
     switch (ev.type) {
       case 'navigate':
-        if (sessionCookies.length > 0) await activePage.setCookie(...sessionCookies);
+        if (replayCookies.length > 0) await activePage.setCookie(...replayCookies);
         await activePage.goto(ev.url, { waitUntil: 'networkidle2', timeout: 30000 });
         break;
-      case 'click': {
-        let done = false;
-        if (ev.selector) {
-          try {
-            await activePage.locator(ev.selector).click({ timeout: 3000 });
-            done = true;
-          } catch {}
-        }
-        if (!done) await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
+      case 'click':
+        await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
-      }
-      case 'dblclick': {
-        let done = false;
-        if (ev.selector) {
-          try {
-            await activePage.locator(ev.selector).click({ clickCount: 2, timeout: 3000 });
-            done = true;
-          } catch {}
-        }
-        if (!done) await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
+      case 'dblclick':
+        await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;
-      }
       case 'mousedown':
         await activePage.mouse.move(ev.x, ev.y);
         await activePage.mouse.down({ button: BTN(ev.button) });
@@ -934,9 +858,6 @@ async function dispatchReplayEvent(ev) {
       case 'mouseup':
         await activePage.mouse.move(ev.x, ev.y);
         await activePage.mouse.up({ button: BTN(ev.button) });
-        break;
-      case 'mousemove':
-        await activePage.mouse.move(ev.x, ev.y);
         break;
       case 'wheel':
         await activePage.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
@@ -950,22 +871,12 @@ async function dispatchReplayEvent(ev) {
       case 'keyup':
         await activePage.keyboard.up(ev.key === ' ' ? 'Space' : ev.key);
         break;
-      case 'input': {
-        let done = false;
-        if (ev.selector) {
-          try {
-            await activePage.locator(ev.selector).fill(ev.value ?? '', { timeout: 3000 });
-            done = true;
-          } catch {}
-        }
-        if (!done) {
-          await activePage.keyboard.down('Control');
-          await activePage.keyboard.press('a');
-          await activePage.keyboard.up('Control');
-          await activePage.keyboard.type(ev.value ?? '');
-        }
+      case 'input':
+        await activePage.keyboard.down('Control');
+        await activePage.keyboard.press('a');
+        await activePage.keyboard.up('Control');
+        await activePage.keyboard.type(ev.value ?? '');
         break;
-      }
       case 'contenteditable':
         await activePage.evaluate(
           h => { if (document.activeElement) document.activeElement.innerHTML = h; },
