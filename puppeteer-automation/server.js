@@ -314,6 +314,9 @@ function buildCaptureScript() {
         });
         if (cls.length > 0) return tag + '.' + cls.join('.');
       }
+      // Role-based fallback for non-standard tags acting as buttons/links
+      var role = el.getAttribute && el.getAttribute('role');
+      if (role) return tag + '[role=' + JSON.stringify(role) + ']';
       return null;
     }
 
@@ -921,17 +924,52 @@ async function handleClientMessage(msg, ws) {
 // ─── Replay engine ────────────────────────────────────────────────────────────
 
 // Pick the element matching `selector` whose visible text equals `label`,
-// falling back to the first match if none does. Disambiguates class-only
-// selectors that match many same-class siblings.
+// falling back to the first match if none does. Pierces Shadow DOM and
+// traverses iframes so web component pages and embedded frames work too.
 async function pickByLabelOrFirst(page, selector, label) {
-  const handles = await page.$$(selector);
-  if (handles.length === 0) return null;
-  if (handles.length === 1 || !label) return handles[0];
-  for (const h of handles) {
-    const txt = await h.evaluate((e) => (e.innerText || "").trim());
-    if (txt === label) return h;
+  try {
+    const handle = await page.evaluateHandle(
+      (sel, lbl) => {
+        function collect(root, out) {
+          try { for (const e of root.querySelectorAll(sel)) out.push(e); } catch {}
+          for (const el of root.querySelectorAll("*"))
+            if (el.shadowRoot) collect(el.shadowRoot, out);
+        }
+        const all = [];
+        collect(document, all);
+        if (all.length === 0) return null;
+        if (all.length === 1 || !lbl) return all[0];
+        for (const e of all) {
+          const txt = (e.innerText || e.textContent || "").trim();
+          if (txt === lbl) return e;
+        }
+        return all[0];
+      },
+      selector,
+      label,
+    );
+    const el = handle.asElement();
+    if (el) {
+      const isNull = await el.evaluate((n) => n === null).catch(() => false);
+      if (!isNull) return el;
+    }
+    await handle.dispose().catch(() => {});
+  } catch {}
+
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    try {
+      const handles = await frame.$$(selector);
+      if (handles.length === 0) continue;
+      if (handles.length === 1 || !label) return handles[0];
+      for (const h of handles) {
+        const txt = await h.evaluate((e) => (e.innerText || "").trim());
+        if (txt === label) return h;
+      }
+      return handles[0];
+    } catch {}
   }
-  return handles[0];
+  return null;
 }
 
 // Wait until network goes idle (≤2 concurrent requests for idleTime ms).
@@ -1466,6 +1504,16 @@ async function dispatchReplayEvent(ev) {
           }
         }
         await activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
+        break;
+      case "hover":
+        if (ev.selector) {
+          try {
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
+            if (el) { await el.hover(); break; }
+          } catch {}
+        }
+        if (typeof ev.x === "number" && typeof ev.y === "number")
+          await activePage.mouse.move(ev.x, ev.y);
         break;
       case "wheel":
         await activePage.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });

@@ -73,6 +73,8 @@ function parseArgs() {
     ignoreUrlPatterns: [], // additional URL regex patterns excluded
     bodyIgnore: [], // additional JSON path regex patterns ignored in body diff
     stripParams: [], // additional query param names to strip when comparing URLs
+    retry: 0, // number of times to retry a failed test before reporting fail
+    parallel: 1, // number of parallel browser contexts for execution
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -131,6 +133,12 @@ function parseArgs() {
         break;
       case "--strip-param":
         opts.stripParams.push(args[++i]);
+        break;
+      case "--retry":
+        opts.retry = +args[++i];
+        break;
+      case "--parallel":
+        opts.parallel = +args[++i];
         break;
       case "--help":
       case "-h":
@@ -191,6 +199,13 @@ ${C.bold}Comparison filters (in addition to built-in defaults):${C.reset}
                            Built-in: _ _t _ts nonce cb cachebust timestamp.
                            Use for site-specific tokens like
                            --strip-param netfunnelKeyString.
+
+${C.bold}Reliability / performance:${C.reset}
+  --retry <n>              Re-run a failing test up to <n> times. Reports as
+                           PASS if any retry passes (with a "(flaky)" tag).
+  --parallel <n>           Run up to <n> tests concurrently in separate
+                           browser contexts. Disables page reuse — each test
+                           starts in a fresh context. Default 1 (serial).
   --base-url <url>         Replace origin of all URLs (for environment switching)
                            e.g. --base-url https://staging.example.com
 
@@ -710,14 +725,27 @@ function compareResponses(recorded, actual, opts = {}) {
           }
         }
       }
+      // Compare request body (POST/PUT/PATCH payloads) — only when both sides
+      // recorded one. Recordings made before this feature have no `reqBody`.
+      let reqBodyPass = true;
+      let reqBodyDiffs = [];
+      if (rec.reqBody != null && act.reqBody != null) {
+        try {
+          reqBodyDiffs = jsonDiff(JSON.parse(rec.reqBody), JSON.parse(act.reqBody), "reqBody", bodyIgnore);
+          reqBodyPass = reqBodyDiffs.length === 0;
+        } catch {
+          reqBodyPass = rec.reqBody === act.reqBody;
+          if (!reqBodyPass) reqBodyDiffs = ["request body text mismatch"];
+        }
+      }
       results.push({
         url: rec.url,
         expectedStatus: rec.status,
         actualStatus: act.status,
         statusPass,
         bodyPass,
-        bodyDiffs,
-        pass: statusPass && bodyPass,
+        bodyDiffs: [...bodyDiffs, ...reqBodyDiffs],
+        pass: statusPass && bodyPass && reqBodyPass,
       });
     }
   }
@@ -807,19 +835,263 @@ async function waitNetworkIdle(page, timeout, idleTime = 500) {
 const BTN = (b) =>
   b === "right" ? "right" : b === "middle" ? "middle" : "left";
 
+// Run a DOM assertion event. Returns { pass, message }.
+// Supported event types:
+//   assert-text     {selector, expected, mode: 'equals'|'contains'|'regex'}
+//   assert-visible  {selector, expected: true|false}
+//   assert-attr     {selector, attr, expected, mode?: 'equals'|'contains'|'regex'}
+//   assert-count    {selector, expected, op?: 'eq'|'gte'|'lte'}
+async function runAssertion(page, ev, timeout = 5000) {
+  const label = ev.label || ev.selector || ev.type;
+  try {
+    switch (ev.type) {
+      case "assert-text": {
+        await page.waitForSelector(ev.selector, { timeout, visible: true }).catch(() => {});
+        const actual = await page.$eval(ev.selector, (e) =>
+          (e.innerText || e.textContent || "").trim()
+        ).catch(() => null);
+        if (actual === null) return { type: ev.type, label, pass: false, message: `selector not found: ${ev.selector}` };
+        const mode = ev.mode || "contains";
+        const ok =
+          mode === "equals" ? actual === ev.expected :
+          mode === "regex"  ? new RegExp(ev.expected).test(actual) :
+                              actual.includes(ev.expected);
+        return { type: ev.type, label, pass: ok, expected: ev.expected, actual,
+                 message: ok ? null : `text ${mode} "${ev.expected}" — got "${actual.slice(0, 80)}"` };
+      }
+      case "assert-visible": {
+        const want = ev.expected !== false;
+        if (want) {
+          await page.waitForSelector(ev.selector, { timeout, visible: true }).catch(() => {});
+        }
+        const visible = await page.$eval(ev.selector, (e) => {
+          const r = e.getBoundingClientRect();
+          const s = window.getComputedStyle(e);
+          return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+        }).catch(() => false);
+        const ok = visible === want;
+        return { type: ev.type, label, pass: ok, expected: want, actual: visible,
+                 message: ok ? null : `expected ${want ? "visible" : "hidden"}, got ${visible ? "visible" : "hidden"}` };
+      }
+      case "assert-attr": {
+        await page.waitForSelector(ev.selector, { timeout }).catch(() => {});
+        const actual = await page.$eval(ev.selector, (e, attr) => e.getAttribute(attr), ev.attr).catch(() => null);
+        const mode = ev.mode || "equals";
+        const ok =
+          mode === "equals" ? actual === ev.expected :
+          mode === "regex"  ? actual !== null && new RegExp(ev.expected).test(actual) :
+                              actual !== null && actual.includes(ev.expected);
+        return { type: ev.type, label, pass: ok, expected: ev.expected, actual,
+                 message: ok ? null : `attr ${ev.attr} ${mode} "${ev.expected}" — got "${actual}"` };
+      }
+      case "assert-count": {
+        const op = ev.op || "eq";
+        const actual = await page.$$eval(ev.selector, (els) => els.length).catch(() => 0);
+        const ok =
+          op === "eq"  ? actual === ev.expected :
+          op === "gte" ? actual >= ev.expected :
+          op === "lte" ? actual <= ev.expected :
+                          false;
+        return { type: ev.type, label, pass: ok, expected: ev.expected, actual,
+                 message: ok ? null : `count ${op} ${ev.expected} — got ${actual}` };
+      }
+    }
+  } catch (err) {
+    return { type: ev.type, label, pass: false, message: `assertion error: ${err.message}` };
+  }
+  return null;
+}
+
+// State-based wait events (alternative to time-based sleep):
+//   wait-for-selector  {selector, visible?: bool, timeout?}
+//   wait-for-text      {selector, expected, timeout?}
+//   wait-for-function  {expr, timeout?}  // page-evaluated boolean expression
+// Compare two PNG buffers — exact byte equality is too strict (browsers
+// vary subtly), so we compare image dimensions + the proportion of differing
+// bytes. Returns { pass, sizeMatch, diffRatio } where diffRatio is roughly
+// the fraction of bytes that differ in raw PNG (not perfect, but a useful
+// "did the screenshot change a lot?" signal without an image lib).
+function comparePngBuffers(a, b, threshold = 0.05) {
+  if (!a || !b) return { pass: false, message: "missing buffer" };
+  if (a.length === 0 || b.length === 0) return { pass: false, message: "empty buffer" };
+  // Compare PNG IHDR (bytes 16..24) for width/height/bit depth equality
+  const sizeMatch = a.length >= 24 && b.length >= 24 &&
+    a.slice(16, 24).equals(b.slice(16, 24));
+  if (!sizeMatch) return { pass: false, message: `dimensions differ` };
+  // Count differing bytes after the header (compressed payload — sensitive
+  // to small visual changes but tolerant of identical renders).
+  const len = Math.min(a.length, b.length);
+  let diff = 0;
+  for (let i = 24; i < len; i++) if (a[i] !== b[i]) diff++;
+  const ratio = diff / Math.max(1, len - 24);
+  return { pass: ratio <= threshold, diffRatio: ratio,
+           message: ratio <= threshold ? null : `pixel diff ratio ${(ratio*100).toFixed(1)}% > ${(threshold*100).toFixed(1)}%` };
+}
+
+async function runWait(page, ev, defaultTimeout = 5000) {
+  const timeout = ev.timeout ?? defaultTimeout;
+  try {
+    if (ev.type === "wait-for-selector") {
+      await page.waitForSelector(ev.selector, { timeout, visible: ev.visible !== false });
+      return { pass: true };
+    }
+    if (ev.type === "wait-for-text") {
+      await page.waitForFunction(
+        (sel, exp) => {
+          const e = document.querySelector(sel);
+          return !!e && (e.innerText || e.textContent || "").includes(exp);
+        },
+        { timeout },
+        ev.selector,
+        ev.expected,
+      );
+      return { pass: true };
+    }
+    if (ev.type === "wait-for-function") {
+      await page.waitForFunction(ev.expr, { timeout });
+      return { pass: true };
+    }
+  } catch (err) {
+    return { pass: false, message: `wait timed out (${timeout}ms): ${err.message}` };
+  }
+  return { pass: true };
+}
+
+const ASSERT_TYPES = new Set([
+  "assert-text", "assert-visible", "assert-attr", "assert-count", "assert-screenshot",
+]);
+const WAIT_TYPES = new Set(["wait-for-selector", "wait-for-text", "wait-for-function"]);
+
+// Take a screenshot of `selector` (or full page if absent) and compare
+// against the recorded base64 PNG. Threshold default 5% byte diff.
+async function runScreenshotAssert(page, ev) {
+  const selector = ev.selector;
+  const expectedB64 = ev.expected;
+  if (!expectedB64) return { type: ev.type, label: ev.label || "screenshot",
+                              pass: false, message: "no recorded screenshot" };
+  let actualBuf;
+  try {
+    if (selector) {
+      const el = await page.$(selector);
+      if (!el) return { type: ev.type, label: selector, pass: false,
+                        message: `selector not found: ${selector}` };
+      actualBuf = await el.screenshot({ type: "png" });
+    } else {
+      actualBuf = await page.screenshot({ type: "png", fullPage: false });
+    }
+  } catch (err) {
+    return { type: ev.type, label: ev.label || "screenshot", pass: false,
+             message: `screenshot failed: ${err.message}` };
+  }
+  const expectedBuf = Buffer.from(expectedB64, "base64");
+  const cmp = comparePngBuffers(expectedBuf, actualBuf, ev.threshold ?? 0.05);
+  return {
+    type: ev.type,
+    label: ev.label || selector || "fullpage",
+    pass: cmp.pass,
+    message: cmp.message,
+  };
+}
+
 // Pick the element matching `selector` whose visible text equals `label`,
 // falling back to the first match if none of them match the label. This
 // disambiguates class-only selectors like `button.btn-quick` that match
 // many elements during a recording.
+//
+// The match traverses Shadow DOM (recursively into open shadow roots) and
+// child iframes, so components built on web components (Vaadin, Lit, etc.)
+// and pages with embedded iframes work as expected.
 async function pickByLabelOrFirst(page, selector, label) {
-  const handles = await page.$$(selector);
-  if (handles.length === 0) return null;
-  if (handles.length === 1 || !label) return handles[0];
-  for (const h of handles) {
-    const txt = await h.evaluate((e) => (e.innerText || "").trim());
-    if (txt === label) return h;
+  // 1. Main frame with Shadow DOM piercing
+  try {
+    const handle = await page.evaluateHandle(
+      (sel, lbl) => {
+        function collect(root, out) {
+          try {
+            const direct = root.querySelectorAll(sel);
+            for (const e of direct) out.push(e);
+          } catch {}
+          const all = root.querySelectorAll("*");
+          for (const el of all) {
+            if (el.shadowRoot) collect(el.shadowRoot, out);
+          }
+        }
+        const all = [];
+        collect(document, all);
+        if (all.length === 0) return null;
+        if (all.length === 1 || !lbl) return all[0];
+        for (const e of all) {
+          const txt = (e.innerText || e.textContent || "").trim();
+          if (txt === lbl) return e;
+        }
+        return all[0];
+      },
+      selector,
+      label,
+    );
+    const el = handle.asElement();
+    if (el) {
+      const isNull = await el.evaluate((n) => n === null).catch(() => false);
+      if (!isNull) return el;
+    }
+    await handle.dispose().catch(() => {});
+  } catch {}
+
+  // 2. Child frames (iframes)
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    try {
+      const handles = await frame.$$(selector);
+      if (handles.length === 0) continue;
+      if (handles.length === 1 || !label) return handles[0];
+      for (const h of handles) {
+        const txt = await h.evaluate((e) => (e.innerText || "").trim());
+        if (txt === label) return h;
+      }
+      return handles[0];
+    } catch {}
   }
-  return handles[0];
+  return null;
+}
+
+// If the target element exists in DOM but is currently hidden (typical of
+// hover-revealed dropdown menus on Korean gov/edu sites), find the closest
+// ancestor that *is* visible and likely a menu trigger (aria-haspopup, has
+// hidden submenu children, or is a top-level nav item) and hover it.
+// Returns true if a hover was performed.
+async function tryHoverAncestorTrigger(page, selector) {
+  const triggerInfo = await page.evaluate((sel) => {
+    const target = document.querySelector(sel);
+    if (!target) return null;
+    const visible = (() => {
+      const r = target.getBoundingClientRect();
+      const s = window.getComputedStyle(target);
+      return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+    })();
+    if (visible) return null;
+    let cur = target.parentElement;
+    while (cur && cur !== document.body) {
+      const r = cur.getBoundingClientRect();
+      const s = window.getComputedStyle(cur);
+      const isVisible = r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+      if (isVisible) {
+        const haspopup = cur.getAttribute("aria-haspopup");
+        const cls = (cur.className || "").toString();
+        if (haspopup === "true" || haspopup === "menu" ||
+            /\b(has-(dropdown|menu|sub)|menu-item|gnb|lnb|nav-item)\b/.test(cls) ||
+            cur.querySelector(":scope > ul, :scope > .submenu, :scope > .sub-menu, :scope > [class*='dropdown' i]")) {
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }
+      }
+      cur = cur.parentElement;
+    }
+    return null;
+  }, selector);
+  if (!triggerInfo) return false;
+  await page.mouse.move(triggerInfo.x, triggerInfo.y);
+  // Brief settle so CSS :hover transitions fire and the submenu becomes visible
+  await new Promise((r) => setTimeout(r, 150));
+  return true;
 }
 
 async function dispatchEvent(page, ev, baseUrl, fast = false) {
@@ -833,7 +1105,19 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "click":
       if (ev.selector) {
         try {
-          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
+          let el = await pickByLabelOrFirst(page, ev.selector, ev.label);
+          // Hover-revealed menu items: if the element exists but is hidden,
+          // hover an ancestor menu trigger and retry.
+          if (el) {
+            const visible = await el.evaluate((e) => {
+              const r = e.getBoundingClientRect();
+              const s = window.getComputedStyle(e);
+              return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+            }).catch(() => true);
+            if (!visible && await tryHoverAncestorTrigger(page, ev.selector)) {
+              el = await pickByLabelOrFirst(page, ev.selector, ev.label);
+            }
+          }
           if (el) {
             await el.click();
             break;
@@ -853,6 +1137,19 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
         } catch {}
       }
       await page.mouse.click(ev.x, ev.y, { clickCount: 2 });
+      break;
+    case "hover":
+      if (ev.selector) {
+        try {
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
+          if (el) {
+            await el.hover();
+            break;
+          }
+        } catch {}
+      }
+      if (typeof ev.x === "number" && typeof ev.y === "number")
+        await page.mouse.move(ev.x, ev.y);
       break;
     case "wheel":
       await page.mouse.wheel({ deltaX: ev.deltaX, deltaY: ev.deltaY });
@@ -940,6 +1237,8 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   const replayTriggerMap = new Map(); // eventIdx → [url, ...]
   const pending = new Set();
   const jsErrors = [];
+  const assertResults = []; // {type, label, pass, message, expected?, actual?}
+  const waitFailures = []; // explicit wait events that timed out
 
   const onPageError = (err) => {
     jsErrors.push(err.message);
@@ -956,19 +1255,24 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
+    // Capture request method + body for non-GET requests so POST/PUT payloads
+    // can be validated alongside the response.
+    const req = response.request();
+    const method = req.method();
+    const reqBody = method !== "GET" && method !== "HEAD" ? (req.postData() ?? null) : null;
 
     if (!wantBody) {
-      replayResponses.push({ url, status, contentType: ct, body: null });
+      replayResponses.push({ url, status, contentType: ct, body: null, method, reqBody });
       return;
     }
     const p = response
       .buffer()
       .then((buf) => {
         const body = buf.length <= 51200 ? buf.toString("utf8") : null;
-        replayResponses.push({ url, status, contentType: ct, body });
+        replayResponses.push({ url, status, contentType: ct, body, method, reqBody });
       })
       .catch(() =>
-        replayResponses.push({ url, status, contentType: ct, body: null }),
+        replayResponses.push({ url, status, contentType: ct, body: null, method, reqBody }),
       )
       .finally(() => pending.delete(p));
     pending.add(p);
@@ -1025,6 +1329,21 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
         );
       }
 
+      // Assertions and explicit waits are handled separately — they don't
+      // dispatch DOM events, they just observe page state.
+      if (ASSERT_TYPES.has(ev.type)) {
+        const r = ev.type === "assert-screenshot"
+          ? await runScreenshotAssert(page, ev)
+          : await runAssertion(page, ev, opts.timeout);
+        if (r) assertResults.push(r);
+        continue;
+      }
+      if (WAIT_TYPES.has(ev.type)) {
+        const r = await runWait(page, ev, opts.timeout);
+        if (!r.pass) waitFailures.push({ type: ev.type, label: ev.selector || ev.expr, message: r.message });
+        continue;
+      }
+
       const isTrigger = isNetworkTrigger(ev);
       const snapLen = isTrigger ? replayResponseUrls.length : -1;
 
@@ -1068,15 +1387,20 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   const httpFailed = results.filter((r) => !r.pass).length;
   const toastFailed = toastResults.filter((r) => !r.pass).length;
   const triggerFailed = triggerResults.filter((r) => !r.pass).length;
-  const failed = httpFailed + toastFailed + triggerFailed + jsErrors.length;
-  const total = results.length + toastResults.length + triggerResults.length;
+  const assertPassed = assertResults.filter((r) => r.pass).length;
+  const assertFailed = assertResults.filter((r) => !r.pass).length;
+  const waitFailed = waitFailures.length;
+  const failed = httpFailed + toastFailed + triggerFailed + assertFailed + waitFailed + jsErrors.length;
+  const total = results.length + toastResults.length + triggerResults.length + assertResults.length;
 
   return {
     rec,
     results,
     toastResults,
     triggerResults,
-    passed,
+    assertResults,
+    waitFailures,
+    passed: passed + assertPassed,
     failed,
     total,
     duration,
@@ -1135,10 +1459,13 @@ function printConsoleResults(suiteResults) {
       console.log(`  ${C.red}Error: ${s.error}${C.reset}`);
     } else {
       const hasToastErr = s.toastResults && s.toastResults.some((r) => !r.pass);
+      const hasAsserts = (s.assertResults && s.assertResults.length) ||
+                         (s.waitFailures && s.waitFailures.length);
       if (
         s.results.length === 0 &&
         !hasJsErr &&
-        !(s.toastResults && s.toastResults.length)
+        !(s.toastResults && s.toastResults.length) &&
+        !hasAsserts
       ) {
         console.log(`  ${C.dim}No recorded responses to compare${C.reset}`);
       } else {
@@ -1178,6 +1505,18 @@ function printConsoleResults(suiteResults) {
             console.log(
               `  ${C.red}✗${C.reset} ${C.dim}[Trigger:${r.eventType}]${C.reset} ${r.url} — not triggered in replay`,
             );
+        }
+        for (const r of s.assertResults ?? []) {
+          const tag = `[${r.type}]`;
+          if (r.pass)
+            console.log(`  ${C.green}✓${C.reset} ${C.dim}${tag}${C.reset} ${r.label}`);
+          else
+            console.log(
+              `  ${C.red}✗${C.reset} ${C.dim}${tag}${C.reset} ${r.label} — ${r.message}`,
+            );
+        }
+        for (const w of s.waitFailures ?? []) {
+          console.log(`  ${C.red}✗${C.reset} ${C.dim}[${w.type}]${C.reset} ${w.label} — ${w.message}`);
         }
       }
       if (hasJsErr) {
@@ -1413,70 +1752,113 @@ async function main() {
 
   const suiteResults = [];
 
-  // Single shared page across all recordings — no reload between tests.
-  // Tests inherit prior state (URL, cookies, localStorage, scroll position).
-  const context = await browser.createBrowserContext();
-  const page = await context.newPage();
-  await page.setViewport(VIEWPORT);
-  const session = { page, toastSink: null };
-  await page.exposeFunction("__captureToast", (text) => {
-    if (session.toastSink) session.toastSink.push(text);
-  });
-  await page.evaluateOnNewDocument(TOAST_OBSERVER_SCRIPT);
+  // Run a single recording with optional retry on failure. Returns the final
+  // result (last attempt). Adds `flakyAttempts` if a retry succeeded.
+  async function runOne(session, rec) {
+    const maxAttempts = (opts.retry || 0) + 1;
+    let last;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      last = await replayRecording(session, rec, opts, cliCookies);
+      const ok = !last.error && last.failed === 0;
+      if (ok) {
+        if (attempt > 1) last.flakyAttempts = attempt;
+        return last;
+      }
+    }
+    return last;
+  }
 
-  // Group recordings by page URL — same-URL recordings run consecutively so
-  // the shared page does not navigate unnecessarily between them.
-  const groups = groupByPage(rows);
+  function statusLine(result) {
+    if (result.error) return `${C.red}ERROR${C.reset} ${C.dim}(${result.duration.toFixed(1)}s)${C.reset}`;
+    const flaky = result.flakyAttempts ? ` ${C.yellow}(flaky x${result.flakyAttempts})${C.reset}` : "";
+    if (result.failed === 0) {
+      const note = result.total === 0 ? "no checks" : `${result.passed}/${result.total}`;
+      return `${C.green}PASS${C.reset}${flaky} ${C.dim}${note} (${result.duration.toFixed(1)}s)${C.reset}`;
+    }
+    return `${C.red}FAIL${C.reset} ${C.dim}${result.passed}/${result.total} passed (${result.duration.toFixed(1)}s)${C.reset}`;
+  }
+
+  async function makeSession() {
+    const ctx = await browser.createBrowserContext();
+    const page = await ctx.newPage();
+    await page.setViewport(VIEWPORT);
+    const session = { page, toastSink: null };
+    await page.exposeFunction("__captureToast", (text) => {
+      if (session.toastSink) session.toastSink.push(text);
+    });
+    await page.evaluateOnNewDocument(TOAST_OBSERVER_SCRIPT);
+    return { ctx, session };
+  }
+
   const idxWidth = String(rows.length).length;
 
   try {
-    let i = 0;
-    for (const [key, groupRows] of groups) {
-      console.log(
-        `\n${C.bold}━━ Page: ${key || "(blank)"}${C.reset} ` +
-          `${C.dim}(${groupRows.length} recording${groupRows.length === 1 ? "" : "s"})${C.reset}`,
-      );
-
-      let groupPass = 0,
-        groupFail = 0;
-
-      for (const rec of groupRows) {
-        i++;
-        process.stdout.write(
-          `[${String(i).padStart(idxWidth)}/${rows.length}] ${rec.name} … `,
-        );
-
-        const result = await replayRecording(session, rec, opts, cliCookies);
-        suiteResults.push(result);
-
-        if (result.error) {
-          groupFail++;
+    if (opts.parallel > 1) {
+      // ── Parallel mode ────────────────────────────────────────────────────
+      // Each worker has its own context (no page reuse). Tests run in
+      // arrival order across workers; final summary is sorted by recording id.
+      console.log(`\n${C.bold}━━ Parallel mode: ${opts.parallel} workers${C.reset}`);
+      const queue = [...rows];
+      let nextDone = 0;
+      const workers = [];
+      for (let w = 0; w < opts.parallel; w++) {
+        workers.push((async () => {
+          const { ctx, session } = await makeSession();
+          try {
+            while (queue.length > 0) {
+              const rec = queue.shift();
+              if (!rec) break;
+              const result = await runOne(session, rec);
+              suiteResults.push(result);
+              nextDone++;
+              console.log(
+                `[${String(nextDone).padStart(idxWidth)}/${rows.length}] ${rec.name} … ${statusLine(result)}`,
+              );
+            }
+          } finally {
+            await ctx.close();
+          }
+        })());
+      }
+      await Promise.all(workers);
+      // Restore original ordering for the final report
+      const idIndex = new Map(rows.map((r, i) => [r.id, i]));
+      suiteResults.sort((a, b) => idIndex.get(a.rec.id) - idIndex.get(b.rec.id));
+    } else {
+      // ── Serial mode (page reuse + URL grouping) ──────────────────────────
+      const { ctx, session } = await makeSession();
+      try {
+        const groups = groupByPage(rows);
+        let i = 0;
+        for (const [key, groupRows] of groups) {
           console.log(
-            `${C.red}ERROR${C.reset} ${C.dim}(${result.duration.toFixed(1)}s)${C.reset}`,
+            `\n${C.bold}━━ Page: ${key || "(blank)"}${C.reset} ` +
+              `${C.dim}(${groupRows.length} recording${groupRows.length === 1 ? "" : "s"})${C.reset}`,
           );
-          console.log(`  ${C.dim}${result.error}${C.reset}`);
-        } else if (result.failed === 0) {
-          groupPass++;
-          const note = result.total === 0 ? "no checks" : `${result.passed}/${result.total}`;
+          let groupPass = 0, groupFail = 0;
+          for (const rec of groupRows) {
+            i++;
+            process.stdout.write(
+              `[${String(i).padStart(idxWidth)}/${rows.length}] ${rec.name} … `,
+            );
+            const result = await runOne(session, rec);
+            suiteResults.push(result);
+            console.log(statusLine(result));
+            if (result.error) console.log(`  ${C.dim}${result.error}${C.reset}`);
+            if (result.error || result.failed > 0) groupFail++;
+            else groupPass++;
+          }
           console.log(
-            `${C.green}PASS${C.reset} ${C.dim}${note} (${result.duration.toFixed(1)}s)${C.reset}`,
-          );
-        } else {
-          groupFail++;
-          console.log(
-            `${C.red}FAIL${C.reset} ${C.dim}${result.passed}/${result.total} passed (${result.duration.toFixed(1)}s)${C.reset}`,
+            `  ${C.dim}└─ Page result:${C.reset} ` +
+              `${C.green}${groupPass} passed${C.reset}, ` +
+              `${C.red}${groupFail} failed${C.reset}`,
           );
         }
+      } finally {
+        await ctx.close();
       }
-
-      console.log(
-        `  ${C.dim}└─ Page result:${C.reset} ` +
-          `${C.green}${groupPass} passed${C.reset}, ` +
-          `${C.red}${groupFail} failed${C.reset}`,
-      );
     }
   } finally {
-    await context.close();
     await browser.close();
   }
 
