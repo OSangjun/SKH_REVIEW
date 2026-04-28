@@ -174,7 +174,7 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "input":
       if (ev.selector) {
         try {
-          const el = await page.$(ev.selector);
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
           if (el) {
             await el.click({ clickCount: 3 });
             await el.type(ev.value ?? "");
@@ -189,7 +189,16 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
       break;
     case "select":
       if (ev.selector) {
-        try { await page.select(ev.selector, ev.value); break; } catch {}
+        try {
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
+          if (el) {
+            await el.evaluate((node, v) => {
+              node.value = v;
+              node.dispatchEvent(new Event("change", { bubbles: true }));
+            }, ev.value);
+            break;
+          }
+        } catch {}
       }
       await page.evaluate((v) => {
         const el = document.activeElement;
@@ -202,7 +211,7 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "check":
       if (ev.selector) {
         try {
-          const el = await page.$(ev.selector);
+          const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
           if (el) {
             const cur = await el.evaluate((n) => n.checked);
             if (cur !== ev.checked) await el.click();

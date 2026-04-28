@@ -938,7 +938,7 @@ async function dispatchReplayEvent(ev) {
       case "input":
         if (ev.selector) {
           try {
-            const el = await activePage.$(ev.selector);
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
             if (el) {
               await el.click({ clickCount: 3 });
               await el.type(ev.value ?? "");
@@ -954,8 +954,14 @@ async function dispatchReplayEvent(ev) {
       case "select":
         if (ev.selector) {
           try {
-            await activePage.select(ev.selector, ev.value);
-            break;
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
+            if (el) {
+              await el.evaluate((node, v) => {
+                node.value = v;
+                node.dispatchEvent(new Event("change", { bubbles: true }));
+              }, ev.value);
+              break;
+            }
           } catch {}
         }
         await activePage.evaluate((v) => {
@@ -969,7 +975,7 @@ async function dispatchReplayEvent(ev) {
       case "check":
         if (ev.selector) {
           try {
-            const el = await activePage.$(ev.selector);
+            const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
             if (el) {
               const cur = await el.evaluate((n) => n.checked);
               if (cur !== ev.checked) await el.click();
