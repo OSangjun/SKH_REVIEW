@@ -731,9 +731,17 @@ async function runReplay(
         );
     }
 
-    // Post-loop settlement: catch chained requests fired after the last
-    // event's per-event idle window (e.g. Response A triggers Request B).
-    await waitNetworkIdle();
+    // Post-loop settlement: repeat waitNetworkIdle until no new responses
+    // arrive. Handles A→B→C cascade chains of any depth — each pass
+    // catches the next level. Capped at 5 iterations to avoid spinning
+    // on continuously-polling pages.
+    for (let pass = 0; pass < 5; pass++) {
+      const prevLen = replayResponseUrls.length;
+      await waitNetworkIdle();
+      if (replayResponseUrls.length === prevLen) break;
+    }
+    // Update the last trigger's map with ALL responses captured since it
+    // fired — covers chained responses caught in the settlement passes.
     if (lastTriggerIdx >= 0)
       replayTriggerMap.set(lastTriggerIdx, replayResponseUrls.slice(lastTriggerSnapLen));
   } catch (err) {
