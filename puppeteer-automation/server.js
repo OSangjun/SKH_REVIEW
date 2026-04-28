@@ -981,6 +981,21 @@ async function dispatchReplayEvent(ev) {
         break;
       case "click":
         flashElement(ev.selector, ev.x, ev.y);
+        // El Plus dropdown option: open parent select before clicking option
+        if (ev.elSelectSelector) {
+          try {
+            const selEl = await pickByLabelOrFirst(activePage, ev.elSelectSelector);
+            if (selEl) {
+              const isOpen = await selEl.evaluate(
+                (e) => e.classList.contains("is-focus") || e.classList.contains("is-open")
+              ).catch(() => false);
+              if (!isOpen) {
+                await selEl.click();
+                await new Promise((r) => setTimeout(r, 300));
+              }
+            }
+          } catch {}
+        }
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);

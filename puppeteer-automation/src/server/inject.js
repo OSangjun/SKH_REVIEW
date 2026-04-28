@@ -5,10 +5,6 @@
  * `evaluateOnNewDocument`. Runs in the page's JS context (not Node) and
  * forwards events to Node via the exposed `__captureEvent` / `__captureToast`
  * functions.
- *
- * Exported as a string because puppeteer requires a string or a function
- * reference here, and we keep it as a function-returning-a-string so we can
- * extend it later with build-time substitutions if needed.
  */
 function buildCaptureScript() {
   return `(function () {
@@ -23,32 +19,59 @@ function buildCaptureScript() {
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
+    // ── Element Plus detection ────────────────────────────────────────────────
+    // Component root classes (the top-level wrapper div of each El Plus component).
+    var EL_COMP_RE = /\\bel-(select|input|checkbox|radio|switch|cascader|autocomplete|rate|slider|color-picker|date-editor|time-picker|time-select|input-number)\\b/;
+    // Popup option/item classes (rendered in a teleported popper outside the component).
+    var EL_OPT_RE  = /\\bel-(select-dropdown__item|dropdown-menu__item|cascader-node)\\b/;
+
     function isInteractive(el) {
       if (!el || !el.tagName) return false;
       var tag = el.tagName.toUpperCase();
       if (['INPUT','SELECT','TEXTAREA','BUTTON','A','LABEL'].includes(tag)) return true;
       var role = el.getAttribute && el.getAttribute('role');
-      return !!(role && ['button','checkbox','radio','combobox','listbox','option','menuitem','tab','link','switch','menuitemcheckbox','menuitemradio'].includes(role));
+      if (role && ['button','checkbox','radio','combobox','listbox','option','menuitem',
+                   'tab','link','switch','menuitemcheckbox','menuitemradio'].includes(role)) return true;
+      var cls = typeof el.className === 'string' ? el.className : '';
+      return EL_COMP_RE.test(cls) || EL_OPT_RE.test(cls);
     }
 
-    // Walk up the DOM (up to 5 levels) to find the nearest interactive
-    // ancestor. Returns the original element when none is found.
+    // Walk up the DOM to find the best interactive target.
+    // For El Plus: prefer the outermost component root so that clicking inside
+    // an el-select returns the el-select div, not the inner el-input or <input>.
     function nearestInteractive(el) {
       var cur = el;
-      for (var i = 0; i < 5; i++) {
+      var nativeFallback = null;
+      var elPlusRoot = null;
+      for (var i = 0; i < 10; i++) {
         if (!cur || cur === document.documentElement) break;
-        if (isInteractive(cur)) return cur;
+        var cls = typeof cur.className === 'string' ? cur.className : '';
+        // Popup option items → return immediately (they are not inside the component)
+        if (EL_OPT_RE.test(cls)) return cur;
+        // El Plus component root → keep walking to find outermost ancestor
+        if (EL_COMP_RE.test(cls)) { elPlusRoot = cur; cur = cur.parentElement; continue; }
+        // Native interactive → remember first found as fallback
+        if (!nativeFallback) {
+          var tag = cur.tagName && cur.tagName.toUpperCase();
+          if (['INPUT','SELECT','TEXTAREA','BUTTON','A','LABEL'].includes(tag)) {
+            nativeFallback = cur;
+          } else {
+            var role = cur.getAttribute && cur.getAttribute('role');
+            if (role && ['button','checkbox','radio','combobox','listbox','option','menuitem',
+                         'tab','link','switch','menuitemcheckbox','menuitemradio'].includes(role))
+              nativeFallback = cur;
+          }
+        }
         cur = cur.parentElement;
       }
-      return el;
+      return elPlusRoot || nativeFallback || el;
     }
 
     // nth-of-type path anchored at the nearest stable ancestor with an ID.
-    // Last-resort fallback when attribute-based selectors are non-unique.
     function nthChildPath(el) {
       var parts = [];
       var cur = el;
-      for (var depth = 0; depth < 6; depth++) {
+      for (var depth = 0; depth < 8; depth++) {
         if (!cur || cur === document.documentElement) break;
         var tag = cur.tagName.toLowerCase();
         var parent = cur.parentElement;
@@ -60,7 +83,6 @@ function buildCaptureScript() {
           ? tag + ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')'
           : tag;
         parts.unshift(part);
-        // Anchor at nearest stable parent ID
         if (parent.id && /^[a-zA-Z][\\w-]{0,49}$/.test(parent.id)
             && !/^(rc-|ant-|mat-|mdc-|cdk-|ng-|vue-|ember|p-|r[0-9])/.test(parent.id)
             && !/[0-9]{3,}/.test(parent.id)) {
@@ -72,22 +94,102 @@ function buildCaptureScript() {
       return parts.length ? parts.join(' > ') : null;
     }
 
-    // Returns true if the ID looks auto-generated (framework / numeric).
     function isAutoId(id) {
       if (!id) return true;
       if (!/^[a-zA-Z]/.test(id) || id.includes(' ')) return true;
       if (/^(rc-|ant-|mat-|mdc-|cdk-|ng-|vue-|ember|p-|:r)/.test(id)) return true;
-      if (/[0-9]{3,}/.test(id)) return true; // 3+ consecutive digits = likely generated
+      if (/[0-9]{3,}/.test(id)) return true;
       return false;
     }
 
+    // Get El Plus form-item label text for an element inside .el-form-item.
+    function getElFormLabel(el) {
+      var cur = el;
+      for (var i = 0; i < 8; i++) {
+        if (!cur || cur === document.documentElement) break;
+        if (cur.classList && cur.classList.contains('el-form-item')) {
+          var lbl = cur.querySelector('.el-form-item__label');
+          return lbl ? (lbl.textContent || '').trim().replace(/:$/, '').trim() || null : null;
+        }
+        cur = cur.parentElement;
+      }
+      return null;
+    }
+
+    // Find the el-select that currently has its dropdown open.
+    // El Plus adds is-focus to the active select's root div.
+    function findAssociatedSelect(optionEl) {
+      var active = document.querySelector('.el-select.is-focus');
+      if (active) return getSelector(active);
+      // Fallback: walk up from option to popup, then find trigger via aria
+      var popup = optionEl;
+      for (var i = 0; i < 6; i++) {
+        if (!popup) break;
+        if (popup.classList && (popup.classList.contains('el-select__popper') ||
+            popup.classList.contains('el-select-dropdown'))) {
+          var triggerId = popup.getAttribute('aria-labelledby');
+          if (triggerId) {
+            var trigEl = document.getElementById(triggerId);
+            if (trigEl) {
+              var sel = trigEl.closest && trigEl.closest('.el-select');
+              if (sel) return getSelector(sel);
+            }
+          }
+          break;
+        }
+        popup = popup.parentElement;
+      }
+      return null;
+    }
+
     // Build the most stable CSS selector for an element.
-    // Priority: id > data-testid > name > aria-label > type/placeholder/href
-    //           > unique class combo > role > nth-child path.
     function getSelector(el) {
       if (!el || !el.tagName) return null;
       var tag = el.tagName.toLowerCase();
+      var cls = typeof el.className === 'string' ? el.className : '';
 
+      // ── El Plus popup option → generic class; label text disambiguates at replay
+      if (EL_OPT_RE.test(cls)) {
+        return '.' + EL_OPT_RE.exec(cls)[0];
+      }
+
+      // ── El Plus component root → contextual selector ───────────────────────
+      if (EL_COMP_RE.test(cls)) {
+        var elCls = EL_COMP_RE.exec(cls)[0];
+        // 1. Stable ID
+        if (!isAutoId(el.id)) return '#' + el.id;
+        // 2. data-testid / data-cy / data-test
+        var testAttr2 = ['data-testid','data-cy','data-test'];
+        for (var tj = 0; tj < testAttr2.length; tj++) {
+          var tv2 = el.getAttribute && el.getAttribute(testAttr2[tj]);
+          if (tv2) return '[' + testAttr2[tj] + '=' + JSON.stringify(tv2) + ']';
+        }
+        // 3. aria-label on the component root
+        var aria2 = el.getAttribute && el.getAttribute('aria-label');
+        if (aria2) return '.' + elCls + '[aria-label=' + JSON.stringify(aria2) + ']';
+        // 4. Form-item label context (most reliable for El Plus forms)
+        var fLabel = getElFormLabel(el);
+        if (fLabel) {
+          var fi = el.closest && el.closest('.el-form-item');
+          if (fi && fi.parentElement) {
+            var childIdx = Array.prototype.indexOf.call(fi.parentElement.children, fi) + 1;
+            if (childIdx > 0) {
+              var cand = '.el-form-item:nth-child(' + childIdx + ') .' + elCls;
+              try { if (document.querySelectorAll(cand).length === 1) return cand; } catch {}
+            }
+          }
+        }
+        // 5. Placeholder inside component (el-input / el-select)
+        var inner = el.querySelector && el.querySelector('input[placeholder]');
+        if (inner && inner.placeholder) {
+          var phSel = '.' + elCls + ' input[placeholder=' + JSON.stringify(inner.placeholder) + ']';
+          try { if (document.querySelectorAll(phSel).length === 1) return phSel; } catch {}
+        }
+        // 6. nth-child path fallback
+        return nthChildPath(el) || ('.' + elCls);
+      }
+
+      // ── Standard selector logic ────────────────────────────────────────────
       // 1. Stable ID
       if (!isAutoId(el.id)) return '#' + el.id;
 
@@ -115,7 +217,7 @@ function buildCaptureScript() {
       if ((tag === 'input' || tag === 'textarea') && el.placeholder)
         return tag + '[placeholder=' + JSON.stringify(el.placeholder) + ']';
 
-      // 7. href (anchor — skip bare hashes and very long dynamic URLs)
+      // 7. href (anchor)
       var href = tag === 'a' && el.getAttribute && el.getAttribute('href');
       if (href && href !== '#' && href.length < 120)
         return 'a[href=' + JSON.stringify(href) + ']';
@@ -123,11 +225,11 @@ function buildCaptureScript() {
       // 8. Unique class combination (skip volatile state classes)
       var VOLATILE = /^(active|selected|focus|focused|hover|disabled|show|hide|visible|open|closed|is-active|is-open|is-selected|is-disabled|loading|checked)$/;
       if (el.className && typeof el.className === 'string') {
-        var cls = el.className.trim().split(/\\s+/).filter(function(c) {
+        var cls2 = el.className.trim().split(/\\s+/).filter(function(c) {
           return c && !VOLATILE.test(c);
         });
-        if (cls.length > 0) {
-          var clsSel = tag + '.' + cls.join('.');
+        if (cls2.length > 0) {
+          var clsSel = tag + '.' + cls2.join('.');
           try { if (document.querySelectorAll(clsSel).length === 1) return clsSel; } catch {}
         }
       }
@@ -139,7 +241,7 @@ function buildCaptureScript() {
         try { if (document.querySelectorAll(roleSel).length === 1) return roleSel; } catch {}
       }
 
-      // 10. nth-child path (last resort — always returns something)
+      // 10. nth-child path (last resort)
       return nthChildPath(el);
     }
 
@@ -158,6 +260,24 @@ function buildCaptureScript() {
         if (lEl) return (lEl.innerText || lEl.textContent || '').trim() || null;
       }
       if (el.placeholder) return el.placeholder;
+      var cls = typeof el.className === 'string' ? el.className : '';
+      // El Plus: option items and component labels
+      if (EL_OPT_RE.test(cls)) {
+        var optTxt = (el.innerText || el.textContent || '').trim();
+        if (optTxt && optTxt.length <= 80) return optTxt;
+      }
+      if (EL_COMP_RE.test(cls)) {
+        var fLabel = getElFormLabel(el);
+        if (fLabel) return fLabel;
+        // Checkbox/radio inner label
+        var innerLbl = el.querySelector && el.querySelector(
+          '.el-checkbox__label,.el-radio__label,.el-checkbox-button__inner,.el-radio-button__inner'
+        );
+        if (innerLbl) {
+          var innerTxt = (innerLbl.innerText || innerLbl.textContent || '').trim();
+          if (innerTxt) return innerTxt;
+        }
+      }
       var tag = el.tagName && el.tagName.toLowerCase();
       if (tag === 'button' || tag === 'a' || tag === 'label'
           || (el.getAttribute && el.getAttribute('role') === 'button')) {
@@ -167,9 +287,6 @@ function buildCaptureScript() {
       return null;
     }
 
-    // Resolve the best target for a click/interaction event:
-    // walk up to the nearest interactive ancestor, then record its selector
-    // and label. Always attaches selector (even for non-interactive targets).
     function withTarget(base, el) {
       var target = nearestInteractive(el);
       var sel = getSelector(target);
@@ -180,11 +297,21 @@ function buildCaptureScript() {
     }
 
     document.addEventListener('click', e => {
-      cap('click', withTarget({ x: e.clientX, y: e.clientY, button: btn(e.button) }, e.target));
+      var base = { x: e.clientX, y: e.clientY, button: btn(e.button) };
+      // For El Plus dropdown options, record which select triggered this popup
+      var rawTarget = nearestInteractive(e.target);
+      var rawCls = typeof rawTarget.className === 'string' ? rawTarget.className : '';
+      if (EL_OPT_RE.test(rawCls)) {
+        var assocSel = findAssociatedSelect(rawTarget);
+        if (assocSel) base.elSelectSelector = assocSel;
+      }
+      cap('click', withTarget(base, e.target));
     }, true);
+
     document.addEventListener('dblclick', e => {
       cap('dblclick', withTarget({ x: e.clientX, y: e.clientY }, e.target));
     }, true);
+
     document.addEventListener('wheel',
       e => cap('wheel', { x: e.clientX, y: e.clientY, deltaX: e.deltaX, deltaY: e.deltaY }),
       { capture: true, passive: true });

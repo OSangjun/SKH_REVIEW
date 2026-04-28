@@ -22,11 +22,19 @@ async function pickByLabelOrFirst(page, selector, label) {
         collect(document, all);
         if (all.length === 0) return null;
         if (all.length === 1 || !lbl) return all[0];
-        for (const e of all) {
-          const txt = (e.innerText || e.textContent || "").trim();
-          if (txt === lbl) return e;
+        // Prefer VISIBLE element with matching label (important when multiple
+        // El Plus components share the same option labels, e.g., 5 selects
+        // all with "Option 1" — only the open dropdown's item is visible).
+        var firstAnyMatch = null;
+        for (var _i = 0; _i < all.length; _i++) {
+          var _e = all[_i];
+          var _txt = (_e.innerText || _e.textContent || "").trim();
+          if (_txt !== lbl) continue;
+          var _r = _e.getBoundingClientRect();
+          if (_r.width > 0 && _r.height > 0) return _e;
+          if (!firstAnyMatch) firstAnyMatch = _e;
         }
-        return all[0];
+        return firstAnyMatch || all[0];
       },
       selector,
       label,
@@ -116,6 +124,31 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
       });
       break;
     case "click":
+      // If this is an El Plus dropdown option, open the parent select first
+      if (ev.elSelectSelector) {
+        try {
+          // Detect open state via visible dropdown items — more reliable than
+          // is-focus/is-open classes which vary across El Plus versions.
+          const isOpen = await page.evaluate(() => {
+            var items = document.querySelectorAll(".el-select-dropdown__item");
+            for (var _i = 0; _i < items.length; _i++) {
+              var _r = items[_i].getBoundingClientRect();
+              if (_r.width > 0 && _r.height > 0) return true;
+            }
+            return false;
+          }).catch(() => false);
+          if (!isOpen) {
+            // Click the wrapper directly (same as recording-time clickSelect helper)
+            await page.evaluate((sel) => {
+              var el = document.querySelector(sel);
+              if (!el) return;
+              var wrapper = el.querySelector(".el-select__wrapper") || el;
+              wrapper.click();
+            }, ev.elSelectSelector);
+            await new Promise((r) => setTimeout(r, 300));
+          }
+        } catch {}
+      }
       if (ev.selector) {
         try {
           let el = await pickByLabelOrFirst(page, ev.selector, ev.label);
