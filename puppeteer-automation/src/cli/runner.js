@@ -117,16 +117,12 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     const startUrl = applyBaseUrl(rec.url, opts.baseUrl);
     const idleTime = opts.fast ? 200 : 500;
 
-    if (page.url() !== startUrl) {
-      if (opts.verbose) console.log(`  ${C.dim}Load: ${startUrl}${C.reset}`);
-      const waitUntil = opts.fast ? "domcontentloaded" : "networkidle2";
-      await page.goto(startUrl, { waitUntil, timeout: 30000 });
-      // Fast mode uses domcontentloaded which can resolve before in-flight
-      // response bodies are available — wait for network to settle.
-      if (opts.fast) await waitNetworkIdle(page, opts.requestTimeout, idleTime);
-    } else if (opts.verbose) {
-      console.log(`  ${C.dim}Reuse: ${startUrl}${C.reset}`);
-    }
+    if (opts.verbose) console.log(`  ${C.dim}Load: ${startUrl}${C.reset}`);
+    const waitUntil = opts.fast ? "domcontentloaded" : "networkidle2";
+    await page.goto(startUrl, { waitUntil, timeout: 30000 });
+    // Fast mode uses domcontentloaded which can resolve before in-flight
+    // response bodies are available — wait for network to settle.
+    if (opts.fast) await waitNetworkIdle(page, opts.requestTimeout, idleTime);
 
     let lastT = 0;
     let lastTriggerIdx = -1;
@@ -207,7 +203,6 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     page.off("response", onResponse);
     if (pending.size > 0)
       await Promise.race([Promise.allSettled([...pending]), sleep(2000)]);
-    // Page is reused across tests — do not close
   }
 
   const duration = (Date.now() - startMs) / 1000;
@@ -255,8 +250,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   };
 }
 
-// Group recordings by page URL — same-URL recordings run consecutively so
-// the shared page does not navigate unnecessarily between them.
+// Group recordings by page URL for console output organisation.
 function groupByPage(rows) {
   const groups = new Map();
   for (const r of rows) {

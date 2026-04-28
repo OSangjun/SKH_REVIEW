@@ -133,20 +133,22 @@ async function main() {
       const workers = [];
       for (let w = 0; w < opts.parallel; w++) {
         workers.push((async () => {
-          const { ctx, session } = await makeSession();
-          try {
-            while (queue.length > 0) {
-              const rec = queue.shift();
-              if (!rec) break;
-              const result = await runOne(session, rec);
-              suiteResults.push(result);
-              nextDone++;
-              console.log(
-                `[${String(nextDone).padStart(idxWidth)}/${rows.length}] ${rec.name} … ${statusLine(result)}`,
-              );
+          while (queue.length > 0) {
+            const rec = queue.shift();
+            if (!rec) break;
+            // Fresh context per test — fully isolated session
+            const { ctx, session } = await makeSession();
+            let result;
+            try {
+              result = await runOne(session, rec);
+            } finally {
+              await ctx.close();
             }
-          } finally {
-            await ctx.close();
+            suiteResults.push(result);
+            nextDone++;
+            console.log(
+              `[${String(nextDone).padStart(idxWidth)}/${rows.length}] ${rec.name} … ${statusLine(result)}`,
+            );
           }
         })());
       }
@@ -154,34 +156,36 @@ async function main() {
       const idIndex = new Map(rows.map((r, i) => [r.id, i]));
       suiteResults.sort((a, b) => idIndex.get(a.rec.id) - idIndex.get(b.rec.id));
     } else {
-      const { ctx, session } = await makeSession();
-      try {
-        const groups = groupByPage(rows);
-        let i = 0;
-        for (const [key, groupRows] of groups) {
-          console.log(
-            `\n${C.bold}━━ Page: ${key || "(blank)"}${C.reset} ` +
-              `${C.dim}(${groupRows.length} recording${groupRows.length === 1 ? "" : "s"})${C.reset}`,
-          );
-          let groupPass = 0, groupFail = 0;
-          for (const rec of groupRows) {
-            i++;
-            process.stdout.write(`[${String(i).padStart(idxWidth)}/${rows.length}] ${rec.name} … `);
-            const result = await runOne(session, rec);
-            suiteResults.push(result);
-            console.log(statusLine(result));
-            if (result.error) console.log(`  ${C.dim}${result.error}${C.reset}`);
-            if (result.error || result.failed > 0) groupFail++;
-            else groupPass++;
+      const groups = groupByPage(rows);
+      let i = 0;
+      for (const [key, groupRows] of groups) {
+        console.log(
+          `\n${C.bold}━━ Page: ${key || "(blank)"}${C.reset} ` +
+            `${C.dim}(${groupRows.length} recording${groupRows.length === 1 ? "" : "s"})${C.reset}`,
+        );
+        let groupPass = 0, groupFail = 0;
+        for (const rec of groupRows) {
+          i++;
+          process.stdout.write(`[${String(i).padStart(idxWidth)}/${rows.length}] ${rec.name} … `);
+          // Fresh context per test — fully isolated session
+          const { ctx, session } = await makeSession();
+          let result;
+          try {
+            result = await runOne(session, rec);
+          } finally {
+            await ctx.close();
           }
-          console.log(
-            `  ${C.dim}└─ Page result:${C.reset} ` +
-              `${C.green}${groupPass} passed${C.reset}, ` +
-              `${C.red}${groupFail} failed${C.reset}`,
-          );
+          suiteResults.push(result);
+          console.log(statusLine(result));
+          if (result.error) console.log(`  ${C.dim}${result.error}${C.reset}`);
+          if (result.error || result.failed > 0) groupFail++;
+          else groupPass++;
         }
-      } finally {
-        await ctx.close();
+        console.log(
+          `  ${C.dim}└─ Page result:${C.reset} ` +
+            `${C.green}${groupPass} passed${C.reset}, ` +
+            `${C.red}${groupFail} failed${C.reset}`,
+        );
       }
     }
   } finally {
