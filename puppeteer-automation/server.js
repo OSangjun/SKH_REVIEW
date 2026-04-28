@@ -548,7 +548,7 @@ async function handleClientMessage(msg, ws) {
 // Wait until network goes idle (≤2 concurrent requests for idleTime ms).
 // Silently absorbs timeout — some pages keep persistent connections.
 // Fast-mode default: 200ms idle is enough for typical localhost/API responses.
-async function waitNetworkIdle(timeout = 5000) {
+async function waitNetworkIdle(timeout = 60000) {
   try {
     await activePage.waitForNetworkIdle({ idleTime: 200, timeout });
   } catch {}
@@ -707,11 +707,11 @@ async function runReplay(
 
       await dispatchReplayEvent(ev);
 
-      if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle(5000);
+      if (NETWORK_EVENTS.has(ev.type)) await waitNetworkIdle();
       if (ev.type === "keydown" && (ev.key === "Enter" || ev.code === "Enter"))
-        await waitNetworkIdle(5000);
+        await waitNetworkIdle();
       if (ev.type === "check" || ev.type === "select")
-        await waitNetworkIdle(5000);
+        await waitNetworkIdle();
 
       if (isTrigger && snapLen >= 0)
         replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));

@@ -10,6 +10,7 @@ function parseArgs() {
     list: false,
     speed: 1.0,
     timeout: 5000,
+    requestTimeout: 60000,
     output: null,
     junit: null,
     baseUrl: null,
@@ -33,7 +34,8 @@ function parseArgs() {
       case "--all":           opts.all = true; break;
       case "--list":          opts.list = true; break;
       case "--speed":         opts.speed = parseFloat(args[++i]); break;
-      case "--timeout":       opts.timeout = +args[++i]; break;
+      case "--timeout":         opts.timeout = +args[++i]; break;
+      case "--request-timeout": opts.requestTimeout = +args[++i]; break;
       case "--output":        opts.output = args[++i]; break;
       case "--junit":         opts.junit = args[++i]; break;
       case "--base-url":      opts.baseUrl = args[++i]; break;
@@ -63,6 +65,10 @@ function parseArgs() {
     console.error(`${C.red}Error:${C.reset} --timeout must be a positive integer ms value (got ${opts.timeout})`);
     process.exit(2);
   }
+  if (opts.requestTimeout <= 0 || !Number.isInteger(opts.requestTimeout)) {
+    console.error(`${C.red}Error:${C.reset} --request-timeout must be a positive integer ms value (got ${opts.requestTimeout})`);
+    process.exit(2);
+  }
   return opts;
 }
 
@@ -84,7 +90,10 @@ ${C.bold}Replay options:${C.reset}
   --fast                   CI mode: skip recorded user think-time, use
                            domcontentloaded for navigations, idleTime 200ms.
                            Use this in CI/CD pipelines.
-  --timeout <ms>           Network idle timeout in ms (default: 5000)
+  --timeout <ms>           Assertion/wait-element timeout in ms (default: 5000)
+  --request-timeout <ms>   Max time to wait for network idle after each trigger
+                           event (default: 60000). Increase for APIs that take
+                           tens of seconds to respond.
 
 ${C.bold}Comparison filters (in addition to built-in defaults):${C.reset}
   --ignore-host <host>     Exclude responses to this host from comparison.

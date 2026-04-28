@@ -123,7 +123,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
       await page.goto(startUrl, { waitUntil, timeout: 30000 });
       // Fast mode uses domcontentloaded which can resolve before in-flight
       // response bodies are available — wait for network to settle.
-      if (opts.fast) await waitNetworkIdle(page, opts.timeout, idleTime);
+      if (opts.fast) await waitNetworkIdle(page, opts.requestTimeout, idleTime);
     } else if (opts.verbose) {
       console.log(`  ${C.dim}Reuse: ${startUrl}${C.reset}`);
     }
@@ -174,7 +174,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
         (ev.type === "keydown" && (ev.key === "Enter" || ev.code === "Enter")) ||
         ev.type === "check" ||
         ev.type === "select";
-      if (needsWait) await waitNetworkIdle(page, opts.timeout, idleTime);
+      if (needsWait) await waitNetworkIdle(page, opts.requestTimeout, idleTime);
 
       if (isTrigger && snapLen >= 0)
         replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
