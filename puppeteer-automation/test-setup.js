@@ -370,6 +370,24 @@ async function main() {
     });
   });
 
+  // ── Mock-replay 모드 테스트 ───────────────────────────────────────────────
+  console.log("\n═══════════════════════════════════════════════════");
+  console.log("  목(Mock) 리플레이 모드 테스트");
+  console.log("  (XHR/fetch는 녹화 응답으로 가로채, HTTP 비교 생략)");
+  console.log("═══════════════════════════════════════════════════\n");
+
+  await new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["run-tests.js", "--all", "--base-url", BASE, "--fast", "--mock-replay", "--verbose"],
+      { cwd: __dirname, stdio: "inherit" }
+    );
+    child.on("exit", code => {
+      console.log(`\nrun-tests.js (mock) 종료 코드: ${code}`);
+      resolve(code);
+    });
+  });
+
   server2.close();
   console.log("\n테스트 완료.\n");
 }
