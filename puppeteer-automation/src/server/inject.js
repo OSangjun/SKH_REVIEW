@@ -23,43 +23,127 @@ function buildCaptureScript() {
 
     function btn(b) { return b === 2 ? 'right' : b === 1 ? 'middle' : 'left'; }
 
-    // Build a stable CSS selector for form/interactive elements.
-    // Falls back to a class-based selector for buttons/links — combined with
-    // the recorded label, replay can disambiguate same-class siblings.
+    function isInteractive(el) {
+      if (!el || !el.tagName) return false;
+      var tag = el.tagName.toUpperCase();
+      if (['INPUT','SELECT','TEXTAREA','BUTTON','A','LABEL'].includes(tag)) return true;
+      var role = el.getAttribute && el.getAttribute('role');
+      return !!(role && ['button','checkbox','radio','combobox','listbox','option','menuitem','tab','link','switch','menuitemcheckbox','menuitemradio'].includes(role));
+    }
+
+    // Walk up the DOM (up to 5 levels) to find the nearest interactive
+    // ancestor. Returns the original element when none is found.
+    function nearestInteractive(el) {
+      var cur = el;
+      for (var i = 0; i < 5; i++) {
+        if (!cur || cur === document.documentElement) break;
+        if (isInteractive(cur)) return cur;
+        cur = cur.parentElement;
+      }
+      return el;
+    }
+
+    // nth-of-type path anchored at the nearest stable ancestor with an ID.
+    // Last-resort fallback when attribute-based selectors are non-unique.
+    function nthChildPath(el) {
+      var parts = [];
+      var cur = el;
+      for (var depth = 0; depth < 6; depth++) {
+        if (!cur || cur === document.documentElement) break;
+        var tag = cur.tagName.toLowerCase();
+        var parent = cur.parentElement;
+        if (!parent) break;
+        var sibs = Array.prototype.filter.call(parent.children, function(c) {
+          return c.tagName === cur.tagName;
+        });
+        var part = sibs.length > 1
+          ? tag + ':nth-of-type(' + (sibs.indexOf(cur) + 1) + ')'
+          : tag;
+        parts.unshift(part);
+        // Anchor at nearest stable parent ID
+        if (parent.id && /^[a-zA-Z][\\w-]{0,49}$/.test(parent.id)
+            && !/^(rc-|ant-|mat-|mdc-|cdk-|ng-|vue-|ember|p-|r[0-9])/.test(parent.id)
+            && !/[0-9]{3,}/.test(parent.id)) {
+          parts.unshift('#' + parent.id);
+          return parts.join(' > ');
+        }
+        cur = parent;
+      }
+      return parts.length ? parts.join(' > ') : null;
+    }
+
+    // Returns true if the ID looks auto-generated (framework / numeric).
+    function isAutoId(id) {
+      if (!id) return true;
+      if (!/^[a-zA-Z]/.test(id) || id.includes(' ')) return true;
+      if (/^(rc-|ant-|mat-|mdc-|cdk-|ng-|vue-|ember|p-|:r)/.test(id)) return true;
+      if (/[0-9]{3,}/.test(id)) return true; // 3+ consecutive digits = likely generated
+      return false;
+    }
+
+    // Build the most stable CSS selector for an element.
+    // Priority: id > data-testid > name > aria-label > type/placeholder/href
+    //           > unique class combo > role > nth-child path.
     function getSelector(el) {
       if (!el || !el.tagName) return null;
       var tag = el.tagName.toLowerCase();
-      if (el.id && /^[a-zA-Z]/.test(el.id) && !el.id.includes(' '))
-        return '#' + el.id;
-      if (el.name)
-        return tag + '[name=' + JSON.stringify(el.name) + ']';
-      var testId = el.getAttribute && el.getAttribute('data-testid');
-      if (testId) return '[data-testid=' + JSON.stringify(testId) + ']';
+
+      // 1. Stable ID
+      if (!isAutoId(el.id)) return '#' + el.id;
+
+      // 2. data-testid / data-cy / data-test
+      var testAttr = ['data-testid','data-cy','data-test'];
+      for (var ti = 0; ti < testAttr.length; ti++) {
+        var tv = el.getAttribute && el.getAttribute(testAttr[ti]);
+        if (tv) return '[' + testAttr[ti] + '=' + JSON.stringify(tv) + ']';
+      }
+
+      // 3. name (form elements)
+      if (el.name) return tag + '[name=' + JSON.stringify(el.name) + ']';
+
+      // 4. aria-label
       var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
       if (ariaLabel) return tag + '[aria-label=' + JSON.stringify(ariaLabel) + ']';
-      if (tag === 'input' && el.type && ['checkbox','radio'].includes(el.type))
+
+      // 5. type + value (checkbox / radio)
+      if (tag === 'input' && el.type && (el.type === 'checkbox' || el.type === 'radio'))
         return el.value
           ? tag + '[type=' + JSON.stringify(el.type) + '][value=' + JSON.stringify(el.value) + ']'
           : tag + '[type=' + JSON.stringify(el.type) + ']';
-      if (tag === 'input' && el.placeholder)
+
+      // 6. placeholder
+      if ((tag === 'input' || tag === 'textarea') && el.placeholder)
         return tag + '[placeholder=' + JSON.stringify(el.placeholder) + ']';
-      // Class-based fallback for buttons/links (paired with label at replay)
-      if (tag === 'a' && el.getAttribute && el.getAttribute('href'))
-        return tag + '[href=' + JSON.stringify(el.getAttribute('href')) + ']';
+
+      // 7. href (anchor — skip bare hashes and very long dynamic URLs)
+      var href = tag === 'a' && el.getAttribute && el.getAttribute('href');
+      if (href && href !== '#' && href.length < 120)
+        return 'a[href=' + JSON.stringify(href) + ']';
+
+      // 8. Unique class combination (skip volatile state classes)
+      var VOLATILE = /^(active|selected|focus|focused|hover|disabled|show|hide|visible|open|closed|is-active|is-open|is-selected|is-disabled|loading|checked)$/;
       if (el.className && typeof el.className === 'string') {
         var cls = el.className.trim().split(/\\s+/).filter(function(c) {
-          return c && !/^(active|selected|focus|hover|disabled)$/.test(c);
+          return c && !VOLATILE.test(c);
         });
-        if (cls.length > 0) return tag + '.' + cls.join('.');
+        if (cls.length > 0) {
+          var clsSel = tag + '.' + cls.join('.');
+          try { if (document.querySelectorAll(clsSel).length === 1) return clsSel; } catch {}
+        }
       }
-      // Role-based fallback for non-standard tags acting as buttons/links
+
+      // 9. role (unique check)
       var role = el.getAttribute && el.getAttribute('role');
-      if (role) return tag + '[role=' + JSON.stringify(role) + ']';
-      return null;
+      if (role) {
+        var roleSel = tag + '[role=' + JSON.stringify(role) + ']';
+        try { if (document.querySelectorAll(roleSel).length === 1) return roleSel; } catch {}
+      }
+
+      // 10. nth-child path (last resort — always returns something)
+      return nthChildPath(el);
     }
 
-    // Get visible label text for an element. Falls back to innerText for
-    // buttons/links so class-based selectors can be disambiguated by label.
+    // Get visible label text for an element.
     function getLabel(el) {
       if (!el) return null;
       var ariaLabel = el.getAttribute && el.getAttribute('aria-label');
@@ -75,25 +159,21 @@ function buildCaptureScript() {
       }
       if (el.placeholder) return el.placeholder;
       var tag = el.tagName && el.tagName.toLowerCase();
-      if (tag === 'button' || tag === 'a' || tag === 'label') {
+      if (tag === 'button' || tag === 'a' || tag === 'label'
+          || (el.getAttribute && el.getAttribute('role') === 'button')) {
         var txt = (el.innerText || el.textContent || '').trim();
         if (txt) return txt.length > 80 ? txt.slice(0, 80) : txt;
       }
       return null;
     }
 
-    function isInteractive(el) {
-      if (!el || !el.tagName) return false;
-      var tag = el.tagName.toUpperCase();
-      if (['INPUT','SELECT','TEXTAREA','BUTTON','A','LABEL'].includes(tag)) return true;
-      var role = el.getAttribute && el.getAttribute('role');
-      return !!(role && ['button','checkbox','radio','combobox','listbox','option','menuitem','tab','link'].includes(role));
-    }
-
+    // Resolve the best target for a click/interaction event:
+    // walk up to the nearest interactive ancestor, then record its selector
+    // and label. Always attaches selector (even for non-interactive targets).
     function withTarget(base, el) {
-      if (!isInteractive(el)) return base;
-      var sel = getSelector(el);
-      var lbl = getLabel(el);
+      var target = nearestInteractive(el);
+      var sel = getSelector(target);
+      var lbl = getLabel(target);
       if (sel) base.selector = sel;
       if (lbl) base.label    = lbl;
       return base;
