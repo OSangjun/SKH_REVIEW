@@ -937,6 +937,35 @@ async function runReplay(
 const BTN = (b) =>
   b === "right" ? "right" : b === "middle" ? "middle" : "left";
 
+// Briefly flash a red outline on the target element so the user can follow replay.
+async function flashElement(selector, x, y) {
+  await activePage.evaluate((sel, px, py) => {
+    if (!document.getElementById("__replay-flash-style__")) {
+      const s = document.createElement("style");
+      s.id = "__replay-flash-style__";
+      s.textContent = `
+        @keyframes __replayFlash__ {
+          0%   { outline: 3px solid rgba(220,38,38,0)   !important; outline-offset: 3px !important; }
+          25%  { outline: 3px solid rgba(220,38,38,1)   !important; outline-offset: 3px !important; }
+          75%  { outline: 3px solid rgba(220,38,38,.85) !important; outline-offset: 3px !important; }
+          100% { outline: 3px solid rgba(220,38,38,0)   !important; outline-offset: 3px !important; }
+        }
+        .__replayFlash__ { animation: __replayFlash__ .5s ease forwards !important; }
+      `;
+      document.head.appendChild(s);
+    }
+    let el = null;
+    if (sel) { try { el = document.querySelector(sel); } catch {} }
+    if (!el && typeof px === "number" && typeof py === "number")
+      el = document.elementFromPoint(px, py);
+    if (!el) return;
+    el.classList.remove("__replayFlash__");
+    void el.offsetWidth;
+    el.classList.add("__replayFlash__");
+    setTimeout(() => el && el.classList.remove("__replayFlash__"), 550);
+  }, selector ?? null, x ?? null, y ?? null).catch(() => {});
+}
+
 async function dispatchReplayEvent(ev) {
   try {
     switch (ev.type) {
@@ -949,6 +978,7 @@ async function dispatchReplayEvent(ev) {
         });
         break;
       case "click":
+        flashElement(ev.selector, ev.x, ev.y);
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
@@ -970,6 +1000,7 @@ async function dispatchReplayEvent(ev) {
         await activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
       case "dblclick":
+        flashElement(ev.selector, ev.x, ev.y);
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
@@ -1017,6 +1048,7 @@ async function dispatchReplayEvent(ev) {
         await activePage.keyboard.up(ev.key === " " ? "Space" : ev.key);
         break;
       case "input":
+        flashElement(ev.selector, null, null);
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
@@ -1033,6 +1065,7 @@ async function dispatchReplayEvent(ev) {
         await activePage.keyboard.type(ev.value ?? "");
         break;
       case "select":
+        flashElement(ev.selector, null, null);
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
@@ -1054,6 +1087,7 @@ async function dispatchReplayEvent(ev) {
         }, ev.value);
         break;
       case "check":
+        flashElement(ev.selector, ev.x, ev.y);
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(activePage, ev.selector, ev.label);
