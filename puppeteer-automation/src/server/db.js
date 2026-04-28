@@ -126,6 +126,7 @@ function dbUpdateMeta(id, name, description, tags) {
 function dbUpdateName(id, name) { stmts.updateName.run(name, id); }
 function dbUpdateResponses(id, responsesJson) { stmts.updateResponses.run(responsesJson, id); }
 function dbDeleteRecording(id) { stmts.deleteRecording.run(id); }
+function dbDeleteHistoryByRecording(id) { stmts.deleteHistoryByRecording.run(id); }
 
 function dbGetHistory(recId) { return stmts.getHistory.all(recId); }
 function dbAllHistory() {
@@ -152,5 +153,6 @@ module.exports = {
   dbAllMeta, dbGetMeta,
   dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts,
   dbSaveRecording, dbUpdateMeta, dbUpdateName, dbUpdateResponses, dbDeleteRecording,
+  dbDeleteHistoryByRecording,
   dbGetHistory, dbAllHistory, dbSaveHistory,
 };

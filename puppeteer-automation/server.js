@@ -10,6 +10,7 @@ const {
   dbAllMeta, dbGetMeta,
   dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts,
   dbSaveRecording, dbUpdateMeta, dbUpdateName, dbDeleteRecording,
+  dbDeleteHistoryByRecording,
   dbGetHistory, dbAllHistory, dbSaveHistory,
 } = require("./src/server/db");
 const { buildCaptureScript } = require("./src/server/inject");
@@ -533,7 +534,7 @@ async function handleClientMessage(msg, ws) {
 
     // ── Delete ────────────────────────────────────────────────────────────────
     case "delete-recording": {
-      stmts.deleteHistoryByRecording.run(msg.id);
+      dbDeleteHistoryByRecording(msg.id);
       dbDeleteRecording(msg.id);
       ws.send(JSON.stringify({ type: "recordings", list: dbAllMeta() }));
       break;
