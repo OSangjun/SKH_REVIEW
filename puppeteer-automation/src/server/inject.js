@@ -296,6 +296,29 @@ function buildCaptureScript() {
       return base;
     }
 
+    // Briefly highlight the target element with a green glow during recording
+    // so the user can see which element was captured.
+    function flashTarget(el, isInput) {
+      if (!el || !el.classList) return;
+      if (!document.getElementById('__rec-flash-style__')) {
+        var s = document.createElement('style');
+        s.id = '__rec-flash-style__';
+        s.textContent =
+          '@keyframes __rfRec__ {' +
+            '0%  {outline:3px solid rgba(16,185,129,0)  !important;outline-offset:4px !important;background-color:rgba(16,185,129,0)   !important}' +
+            '20% {outline:3px solid rgba(16,185,129,1)  !important;outline-offset:4px !important;background-color:rgba(16,185,129,0.2) !important}' +
+            '80% {outline:3px solid rgba(16,185,129,.8) !important;outline-offset:4px !important;background-color:rgba(16,185,129,0.1) !important}' +
+            '100%{outline:3px solid rgba(16,185,129,0)  !important;outline-offset:4px !important;background-color:rgba(16,185,129,0)   !important}' +
+          '}' +
+          '.__rfRec__{animation:__rfRec__ .55s ease forwards !important}';
+        document.head.appendChild(s);
+      }
+      el.classList.remove('__rfRec__');
+      void el.offsetWidth;
+      el.classList.add('__rfRec__');
+      setTimeout(function() { if (el) el.classList.remove('__rfRec__'); }, 600);
+    }
+
     document.addEventListener('click', e => {
       var base = { x: e.clientX, y: e.clientY, button: btn(e.button) };
       // For El Plus dropdown options, record which select triggered this popup
@@ -305,6 +328,7 @@ function buildCaptureScript() {
         var assocSel = findAssociatedSelect(rawTarget);
         if (assocSel) base.elSelectSelector = assocSel;
       }
+      flashTarget(rawTarget);
       cap('click', withTarget(base, e.target));
     }, true);
 
@@ -335,6 +359,7 @@ function buildCaptureScript() {
       var el = e.target;
       if (!el) return;
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+        flashTarget(nearestInteractive(el));
         cap('input', withTarget({ value: el.value }, el));
       } else if (el.isContentEditable) {
         cap('contenteditable', { html: el.innerHTML, text: el.innerText });
@@ -347,8 +372,10 @@ function buildCaptureScript() {
       if (el.tagName === 'SELECT') {
         var optLabel = el.options && el.selectedIndex >= 0
           ? (el.options[el.selectedIndex].text || '').trim() : '';
+        flashTarget(nearestInteractive(el));
         cap('select', withTarget({ value: el.value, optLabel: optLabel }, el));
       } else if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+        flashTarget(nearestInteractive(el));
         cap('check', withTarget({ checked: el.checked, value: el.value }, el));
       }
     }, true);
