@@ -769,9 +769,12 @@ async function runReplay(
 
     for (const r of results) {
       if (r.pass) {
-        log("success", `  ✓ [${r.actualStatus}] ${r.url}`);
+        const note = r.urlParamsMismatch ? " (URL 파라미터 변경됨)" : "";
+        log("success", `  ✓ [${r.actualStatus}] ${r.url}${note}`);
       } else {
         log("fail", `  ✗ [${r.actualStatus}] ${r.url}`);
+        if (r.urlParamsMismatch)
+          log("warn", `    URL 파라미터 변경됨 (경로만 일치)`);
         if (!r.statusPass)
           log("fail", `    상태코드: ${r.expectedStatus} → ${r.actualStatus}`);
         for (const d of r.bodyDiffs.slice(0, 3))

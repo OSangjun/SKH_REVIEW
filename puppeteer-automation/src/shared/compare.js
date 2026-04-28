@@ -63,13 +63,42 @@ function compareResponses(recorded, actual, opts = {}) {
   const recMap = buildResponseMap(recorded, stripParams);
   const actMap = buildResponseMap(actual, stripParams);
 
+  // Fallback: group actual responses by path-only URL (all query params
+  // stripped) so session tokens / CSRF params in the URL don't break matching.
+  // We track a per-path consumption index to preserve positional pairing.
+  const actPathMap = new Map();
+  for (const list of actMap.values()) {
+    for (const r of list) {
+      const pk = normalizeUrl(r.url);
+      if (!actPathMap.has(pk)) actPathMap.set(pk, []);
+      actPathMap.get(pk).push(r);
+    }
+  }
+  const actPathCursor = new Map(); // pathKey → next unmatched index
+
   const results = [];
   for (const [url, recList] of recMap) {
     if (isBlockedUrl(url, ignoreHosts, ignoreUrlPatterns)) continue;
     const actList = actMap.get(url) ?? [];
     for (let i = 0; i < recList.length; i++) {
       const rec = recList[i];
-      const act = actList[i];
+      let act = actList[i] ?? null;
+      let urlParamsMismatch = false;
+
+      if (!act) {
+        // Exact canonical URL not found — try path-only fallback to tolerate
+        // session tokens / dynamic query params that change between runs.
+        const pk = normalizeUrl(rec.url);
+        const pathList = actPathMap.get(pk) ?? [];
+        // Skip items already consumed by a previous exact-match entry for this path
+        const exactConsumed = actList.length;
+        const cursor = Math.max(actPathCursor.get(pk) ?? 0, exactConsumed);
+        if (cursor < pathList.length) {
+          act = pathList[cursor];
+          actPathCursor.set(pk, cursor + 1);
+          urlParamsMismatch = true;
+        }
+      }
 
       if (!act) {
         results.push({
@@ -114,13 +143,15 @@ function compareResponses(recorded, actual, opts = {}) {
         }
       }
 
+      const allDiffs = [...bodyDiffs, ...reqBodyDiffs];
       results.push({
         url: rec.url,
         expectedStatus: rec.status,
         actualStatus: act.status,
         statusPass,
         bodyPass,
-        bodyDiffs: [...bodyDiffs, ...reqBodyDiffs],
+        bodyDiffs: allDiffs,
+        urlParamsMismatch,
         pass: statusPass && bodyPass && reqBodyPass,
       });
     }

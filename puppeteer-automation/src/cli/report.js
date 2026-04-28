@@ -70,9 +70,12 @@ function printConsoleResults(suiteResults) {
         } else {
           for (const r of s.results) {
             if (r.pass) {
-              console.log(`  ${C.green}✓${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${r.url}`);
+              const note = r.urlParamsMismatch ? ` ${C.dim}(URL params changed)${C.reset}` : "";
+              console.log(`  ${C.green}✓${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${r.url}${note}`);
             } else {
               console.log(`  ${C.red}✗${C.reset} ${C.dim}[${r.actualStatus}]${C.reset} ${r.url}`);
+              if (r.urlParamsMismatch)
+                console.log(`    ${C.yellow}URL params changed (matched by path only)${C.reset}`);
               if (!r.statusPass)
                 console.log(`    ${C.red}Status: expected ${r.expectedStatus}, got ${r.actualStatus}${C.reset}`);
               for (const d of r.bodyDiffs.slice(0, 3))
