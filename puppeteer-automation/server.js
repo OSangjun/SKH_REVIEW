@@ -682,28 +682,24 @@ async function runReplay(
       );
     }
 
-    // 4. Set up mock routes before navigation so the initial page load can
-    //    also serve mocked responses if needed.
+    // 4. Set up mock request interception before navigation.
+    //    Same URL (including query params) always returns the same recorded
+    //    response — no queue consumption.
+    let mockRequestHandler = null;
     if (mockReplay) {
       const mockMap = new Map();
-      const mockCursors = new Map();
       for (const r of recordedResponses) {
         const key = canonicalUrl(r.url);
-        if (!mockMap.has(key)) mockMap.set(key, []);
-        mockMap.get(key).push(r);
+        if (!mockMap.has(key)) mockMap.set(key, r);
       }
-      await activePage.route("**/*", async (route) => {
-        const req = route.request();
-        if (req.resourceType() !== "xhr" && req.resourceType() !== "fetch")
-          return route.continue();
-        const key = canonicalUrl(req.url());
-        const queue = mockMap.get(key);
-        const cursor = mockCursors.get(key) ?? 0;
-        const rec = queue?.[cursor];
-        if (!rec || rec.body === null) return route.continue();
-        mockCursors.set(key, cursor + 1);
-        log("info", `[Mock] ${req.method()} ${req.url()}`);
-        await route.fulfill({
+      mockRequestHandler = async (request) => {
+        const rt = request.resourceType();
+        if (rt !== "xhr" && rt !== "fetch") return request.continue();
+        const key = canonicalUrl(request.url());
+        const rec = mockMap.get(key);
+        if (!rec || rec.body === null) return request.continue();
+        log("info", `[Mock] ${request.method()} ${request.url()}`);
+        await request.respond({
           status: rec.status,
           headers: {
             "content-type": rec.contentType,
@@ -712,7 +708,9 @@ async function runReplay(
           },
           body: rec.body,
         });
-      });
+      };
+      await activePage.setRequestInterception(true);
+      activePage.on("request", mockRequestHandler);
     }
 
     // 5. Always navigate — fresh context requires a full page load.
@@ -805,7 +803,10 @@ async function runReplay(
     replayToastActive = false;
     activePage.off("pageerror", onPageError);
     activePage.off("response", onResponse);
-    if (mockReplay) await activePage.unrouteAll().catch(() => {});
+    if (mockReplay && mockRequestHandler) {
+      activePage.off("request", mockRequestHandler);
+      await activePage.setRequestInterception(false).catch(() => {});
+    }
     // Wait for in-flight body reads
     if (replayRespPending.size > 0)
       await Promise.race([

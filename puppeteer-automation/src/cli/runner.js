@@ -112,30 +112,25 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   let error = null;
 
   // ── Mock-replay: intercept XHR/fetch and return recorded responses ──────────
-  // Build URL → response queue Map (same URL called N times → consumed in order).
+  // Same URL (including query params, after strip) always returns the same
+  // recorded response — no queue consumption.
   let mockMap = null;
-  let mockCursors = null;
+  let mockRequestHandler = null;
   async function setupMockRoutes() {
     mockMap = new Map();
-    mockCursors = new Map();
     for (const r of recorded) {
       const key = canonicalUrl(r.url, opts.stripParams);
-      if (!mockMap.has(key)) mockMap.set(key, []);
-      mockMap.get(key).push(r);
+      if (!mockMap.has(key)) mockMap.set(key, r);
     }
-    await page.route("**/*", async (route) => {
-      const req = route.request();
-      if (req.resourceType() !== "xhr" && req.resourceType() !== "fetch")
-        return route.continue();
-      const key = canonicalUrl(req.url(), opts.stripParams);
-      const queue = mockMap.get(key);
-      const cursor = mockCursors.get(key) ?? 0;
-      const rec = queue?.[cursor];
-      if (!rec || rec.body === null) return route.continue();
-      mockCursors.set(key, cursor + 1);
+    mockRequestHandler = async (request) => {
+      const rt = request.resourceType();
+      if (rt !== "xhr" && rt !== "fetch") return request.continue();
+      const key = canonicalUrl(request.url(), opts.stripParams);
+      const rec = mockMap.get(key);
+      if (!rec || rec.body === null) return request.continue();
       if (opts.verbose)
-        console.log(`  ${C.dim}[Mock] ${req.method()} ${req.url()}${C.reset}`);
-      await route.fulfill({
+        console.log(`  ${C.dim}[Mock] ${request.method()} ${request.url()}${C.reset}`);
+      await request.respond({
         status: rec.status,
         headers: {
           "content-type": rec.contentType,
@@ -144,7 +139,9 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
         },
         body: rec.body,
       });
-    });
+    };
+    await page.setRequestInterception(true);
+    page.on("request", mockRequestHandler);
   }
   // ────────────────────────────────────────────────────────────────────────────
 
@@ -240,7 +237,10 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   } finally {
     page.off("pageerror", onPageError);
     page.off("response", onResponse);
-    if (opts.mockReplay) await page.unrouteAll().catch(() => {});
+    if (opts.mockReplay && mockRequestHandler) {
+      page.off("request", mockRequestHandler);
+      await page.setRequestInterception(false).catch(() => {});
+    }
     if (pending.size > 0)
       await Promise.race([Promise.allSettled([...pending]), sleep(2000)]);
   }
