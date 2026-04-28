@@ -653,6 +653,22 @@ async function runReplay(
 
   try {
     firstNavigateDone = false;
+
+    // ── Session isolation ──────────────────────────────────────────────────
+    // 1. Clear all browser cookies so previous test's session doesn't leak.
+    await cdpSession.send("Network.clearBrowserCookies").catch(() => {});
+
+    // 2. Install a one-shot script that clears Web Storage (localStorage /
+    //    sessionStorage) before any page JS runs on the next navigation.
+    let clearStorageId = null;
+    await cdpSession
+      .send("Page.addScriptToEvaluateOnNewDocument", {
+        source: "try{localStorage.clear();sessionStorage.clear();}catch{}",
+      })
+      .then(({ identifier }) => { clearStorageId = identifier; })
+      .catch(() => {});
+
+    // 3. Apply recording cookies (now the only cookies in the browser).
     replayCookies =
       recordingCookies.length > 0 ? recordingCookies : sessionCookies;
     if (replayCookies.length > 0) {
@@ -663,17 +679,20 @@ async function runReplay(
       );
     }
 
-    // Reuse the existing page when its URL already matches the recording's
-    // start URL — skip navigation/refresh between consecutive replays.
-    if (activePage.url() === startUrl) {
-      log("info", `페이지 재사용: ${startUrl}`);
-    } else {
-      log("info", `페이지 로드: ${startUrl}`);
-      await activePage.goto(startUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      });
-    }
+    // 4. Always navigate — fresh context requires a full page load.
+    log("info", `페이지 로드: ${startUrl}`);
+    await activePage.goto(startUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+
+    // 5. Remove the clear-storage script so subsequent navigations within
+    //    this replay (e.g. ev.type === "navigate") are not affected.
+    if (clearStorageId)
+      await cdpSession
+        .send("Page.removeScriptToEvaluateOnNewDocument", { identifier: clearStorageId })
+        .catch(() => {});
+    // ──────────────────────────────────────────────────────────────────────
 
     const total = events.length;
     let lastTriggerIdx = -1;
