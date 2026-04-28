@@ -6,8 +6,9 @@
   const urlInput      = document.getElementById('url-input');
   const goBtn         = document.getElementById('go-btn');
   const recordBtn     = document.getElementById('record-btn');
-  const replayBtn     = document.getElementById('replay-btn');
-  const speedSelect   = document.getElementById('speed-select');
+  const replayBtn        = document.getElementById('replay-btn');
+  const speedSelect      = document.getElementById('speed-select');
+  const httpCompareChk   = document.getElementById('http-compare-chk');
   const canvas        = document.getElementById('browser-canvas');
   const ctx           = canvas.getContext('2d');
   const frameUrlLabel = document.getElementById('frame-url');
@@ -361,7 +362,8 @@
     if (!meta) return;
     replayingName = meta.name;
     setStatus(`재생 시작: ${meta.name}`);
-    send({ type: 'replay', id, speedFactor: parseFloat(speedSelect.value) });
+    send({ type: 'replay', id, speedFactor: parseFloat(speedSelect.value),
+           compareHttp: httpCompareChk.checked });
   }
 
   // ── Replay overlay ────────────────────────────────────────────────────────────
@@ -452,7 +454,8 @@
     const ids = checkedIds.size > 0
       ? [...checkedIds]
       : recordings.map(r => r.id);
-    send({ type: 'run-suite', ids, speedFactor: parseFloat(speedSelect.value) });
+    send({ type: 'run-suite', ids, speedFactor: parseFloat(speedSelect.value),
+           compareHttp: httpCompareChk.checked });
   });
 
   // ── Render recording list ─────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ function parseArgs() {
     stripParams: [],
     retry: 0,
     parallel: 1,
+    httpCompare: true,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -48,8 +49,9 @@ function parseArgs() {
       case "--ignore-url":    opts.ignoreUrlPatterns.push(new RegExp(args[++i])); break;
       case "--ignore-body":   opts.bodyIgnore.push(new RegExp(args[++i])); break;
       case "--strip-param":   opts.stripParams.push(args[++i]); break;
-      case "--retry":         opts.retry = +args[++i]; break;
-      case "--parallel":      opts.parallel = +args[++i]; break;
+      case "--retry":            opts.retry = +args[++i]; break;
+      case "--parallel":         opts.parallel = +args[++i]; break;
+      case "--no-http-compare":  opts.httpCompare = false; break;
       case "--help":
       case "-h":              printHelp(); process.exit(0); break;
       default:
@@ -116,6 +118,9 @@ ${C.bold}Reliability / performance:${C.reset}
   --parallel <n>           Run up to <n> tests concurrently in separate
                            browser contexts. Disables page reuse — each test
                            starts in a fresh context. Default 1 (serial).
+  --no-http-compare        Skip HTTP response body comparison. Only checks
+                           that each API call returned a 2xx status code.
+                           Toast and trigger mapping checks still run.
 
 ${C.bold}Cookie options (override recording cookies, higher priority):${C.reset}
   --cookie <spec>          Add a cookie. Format:

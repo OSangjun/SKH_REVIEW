@@ -54,6 +54,24 @@ function jsonDiff(expected, actual, path = "root", bodyIgnore = []) {
 // Compare recorded vs replay HTTP responses. Returns one result per recorded
 // response. URLs matching the host/url blocklist are skipped (third-party
 // trackers, anti-bot probes).
+// When HTTP body comparison is disabled: just verify every captured response
+// returned a 2xx status code. No URL matching against the recording.
+function buildStatusOnlyResults(replayResponses, opts = {}) {
+  const ignoreHosts = opts.ignoreHosts ?? [];
+  const ignoreUrlPatterns = opts.ignoreUrlPatterns ?? [];
+  return replayResponses
+    .filter(r => !isBlockedUrl(r.url, ignoreHosts, ignoreUrlPatterns))
+    .map(r => ({
+      url: r.url,
+      expectedStatus: "2xx",
+      actualStatus: r.status,
+      statusPass: r.status >= 200 && r.status < 300,
+      bodyPass: true,
+      bodyDiffs: [],
+      pass: r.status >= 200 && r.status < 300,
+    }));
+}
+
 function compareResponses(recorded, actual, opts = {}) {
   const ignoreHosts = opts.ignoreHosts ?? [];
   const ignoreUrlPatterns = opts.ignoreUrlPatterns ?? [];
@@ -202,6 +220,7 @@ function isNetworkTrigger(ev) {
 module.exports = {
   buildResponseMap,
   jsonDiff,
+  buildStatusOnlyResults,
   compareResponses,
   compareToasts,
   compareTriggerMappings,

@@ -19,6 +19,7 @@ const { isApiResponse } = require("./src/shared/api-filter");
 const { isTrackerUrl } = require("./src/shared/blocklist");
 const { pickByLabelOrFirst } = require("./src/shared/dispatch");
 const {
+  buildStatusOnlyResults,
   compareResponses,
   compareToasts,
   compareTriggerMappings,
@@ -428,6 +429,7 @@ async function handleClientMessage(msg, ws) {
         false,
         cookies,
         toasts,
+        msg.compareHttp !== false,
       );
       break;
     }
@@ -485,6 +487,7 @@ async function handleClientMessage(msg, ws) {
           true,
           cookies,
           toasts,
+          msg.compareHttp !== false,
         );
 
         if (result.failed === 0) suitePass++;
@@ -592,6 +595,7 @@ async function runReplay(
   isSuite = false,
   recordingCookies = [],
   recordingToasts = [],
+  compareHttp = true,
 ) {
   const startMs = Date.now();
   if (!isSuite) ws.send(JSON.stringify({ type: "replay-started" }));
@@ -736,10 +740,9 @@ async function runReplay(
   }
 
   // Compare recorded vs actual responses
-  const results =
-    recordedResponses.length > 0
-      ? compareResponses(recordedResponses, replayResponses)
-      : [];
+  const results = compareHttp
+    ? (recordedResponses.length > 0 ? compareResponses(recordedResponses, replayResponses) : [])
+    : buildStatusOnlyResults(replayResponses);
 
   const toastResults = compareToasts(recordingToasts, replayToasts);
   const triggerResults = compareTriggerMappings(events, replayTriggerMap);

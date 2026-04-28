@@ -6,7 +6,7 @@ const { applyBaseUrl, pageKey } = require("../shared/url");
 const { isApiResponse } = require("../shared/api-filter");
 const { isBlockedUrl, isTrackerUrl } = require("../shared/blocklist");
 const {
-  compareResponses, compareToasts, compareTriggerMappings, isNetworkTrigger,
+  buildStatusOnlyResults, compareResponses, compareToasts, compareTriggerMappings, isNetworkTrigger,
 } = require("../shared/compare");
 const {
   NETWORK_EVTS, NO_DELAY_EVTS, dispatchEvent, waitNetworkIdle,
@@ -196,9 +196,18 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     bodyIgnore: opts.bodyIgnore,
     stripParams: opts.stripParams,
   };
-  const results = recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : [];
+  const results = opts.httpCompare === false
+    ? buildStatusOnlyResults(replayResponses, compareOpts)
+    : (recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : []);
   const toastResults = compareToasts(recordedToasts, replayToasts);
-  const triggerResults = compareTriggerMappings(events, replayTriggerMap);
+  // When --base-url is used, remap recorded triggeredUrls to the new origin
+  // so trigger comparison doesn't fail due to host mismatch.
+  const remappedEvents = opts.baseUrl
+    ? events.map(ev => ev.triggeredUrls
+        ? { ...ev, triggeredUrls: ev.triggeredUrls.map(u => applyBaseUrl(u, opts.baseUrl)) }
+        : ev)
+    : events;
+  const triggerResults = compareTriggerMappings(remappedEvents, replayTriggerMap);
   const passed = results.filter((r) => r.pass).length;
   const httpFailed = results.filter((r) => !r.pass).length;
   const toastFailed = toastResults.filter((r) => !r.pass).length;
