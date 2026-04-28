@@ -27,7 +27,7 @@ const {
   jsonDiff,
   isNetworkTrigger,
 } = require("./src/shared/compare");
-const { normalizeUrl } = require("./src/shared/url");
+const { normalizeUrl, canonicalUrl } = require("./src/shared/url");
 
 const CHROME_PATH =
   process.env.CHROME_PATH ||
@@ -430,6 +430,7 @@ async function handleClientMessage(msg, ws) {
         cookies,
         toasts,
         msg.compareHttp !== false,
+        !!msg.mockReplay,
       );
       break;
     }
@@ -488,6 +489,7 @@ async function handleClientMessage(msg, ws) {
           cookies,
           toasts,
           msg.compareHttp !== false,
+          !!msg.mockReplay,
         );
 
         if (result.failed === 0) suitePass++;
@@ -596,6 +598,7 @@ async function runReplay(
   recordingCookies = [],
   recordingToasts = [],
   compareHttp = true,
+  mockReplay = false,
 ) {
   const startMs = Date.now();
   if (!isSuite) ws.send(JSON.stringify({ type: "replay-started" }));
@@ -679,14 +682,47 @@ async function runReplay(
       );
     }
 
-    // 4. Always navigate — fresh context requires a full page load.
+    // 4. Set up mock routes before navigation so the initial page load can
+    //    also serve mocked responses if needed.
+    if (mockReplay) {
+      const mockMap = new Map();
+      const mockCursors = new Map();
+      for (const r of recordedResponses) {
+        const key = canonicalUrl(r.url);
+        if (!mockMap.has(key)) mockMap.set(key, []);
+        mockMap.get(key).push(r);
+      }
+      await activePage.route("**/*", async (route) => {
+        const req = route.request();
+        if (req.resourceType() !== "xhr" && req.resourceType() !== "fetch")
+          return route.continue();
+        const key = canonicalUrl(req.url());
+        const queue = mockMap.get(key);
+        const cursor = mockCursors.get(key) ?? 0;
+        const rec = queue?.[cursor];
+        if (!rec || rec.body === null) return route.continue();
+        mockCursors.set(key, cursor + 1);
+        log("info", `[Mock] ${req.method()} ${req.url()}`);
+        await route.fulfill({
+          status: rec.status,
+          headers: {
+            "content-type": rec.contentType,
+            "access-control-allow-origin": "*",
+            "access-control-allow-headers": "*",
+          },
+          body: rec.body,
+        });
+      });
+    }
+
+    // 5. Always navigate — fresh context requires a full page load.
     log("info", `페이지 로드: ${startUrl}`);
     await activePage.goto(startUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
 
-    // 5. Remove the clear-storage script so subsequent navigations within
+    // 6. Remove the clear-storage script so subsequent navigations within
     //    this replay (e.g. ev.type === "navigate") are not affected.
     if (clearStorageId)
       await cdpSession
@@ -769,6 +805,7 @@ async function runReplay(
     replayToastActive = false;
     activePage.off("pageerror", onPageError);
     activePage.off("response", onResponse);
+    if (mockReplay) await activePage.unrouteAll().catch(() => {});
     // Wait for in-flight body reads
     if (replayRespPending.size > 0)
       await Promise.race([
@@ -778,9 +815,11 @@ async function runReplay(
   }
 
   // Compare recorded vs actual responses
-  const results = compareHttp
-    ? (recordedResponses.length > 0 ? compareResponses(recordedResponses, replayResponses) : [])
-    : buildStatusOnlyResults(replayResponses);
+  const results = mockReplay
+    ? []
+    : compareHttp
+      ? (recordedResponses.length > 0 ? compareResponses(recordedResponses, replayResponses) : [])
+      : buildStatusOnlyResults(replayResponses);
 
   const toastResults = compareToasts(recordingToasts, replayToasts);
   const triggerResults = compareTriggerMappings(events, replayTriggerMap);

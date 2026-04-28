@@ -9,6 +9,7 @@
   const replayBtn        = document.getElementById('replay-btn');
   const speedSelect      = document.getElementById('speed-select');
   const httpCompareChk   = document.getElementById('http-compare-chk');
+  const mockReplayChk    = document.getElementById('mock-replay-chk');
   const canvas        = document.getElementById('browser-canvas');
   const ctx           = canvas.getContext('2d');
   const frameUrlLabel = document.getElementById('frame-url');
@@ -363,7 +364,8 @@
     replayingName = meta.name;
     setStatus(`재생 시작: ${meta.name}`);
     send({ type: 'replay', id, speedFactor: parseFloat(speedSelect.value),
-           compareHttp: httpCompareChk.checked });
+           compareHttp: httpCompareChk.checked,
+           mockReplay: mockReplayChk.checked });
   }
 
   // ── Replay overlay ────────────────────────────────────────────────────────────
@@ -455,7 +457,8 @@
       ? [...checkedIds]
       : recordings.map(r => r.id);
     send({ type: 'run-suite', ids, speedFactor: parseFloat(speedSelect.value),
-           compareHttp: httpCompareChk.checked });
+           compareHttp: httpCompareChk.checked,
+           mockReplay: mockReplayChk.checked });
   });
 
   // ── Render recording list ─────────────────────────────────────────────────────

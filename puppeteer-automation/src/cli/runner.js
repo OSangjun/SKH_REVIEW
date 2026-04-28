@@ -2,7 +2,7 @@
 
 const { mergeCookies } = require("./cookies");
 const C = require("./colors");
-const { applyBaseUrl, pageKey } = require("../shared/url");
+const { applyBaseUrl, canonicalUrl, pageKey } = require("../shared/url");
 const { isApiResponse } = require("../shared/api-filter");
 const { isBlockedUrl, isTrackerUrl } = require("../shared/blocklist");
 const {
@@ -111,11 +111,50 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   const startMs = Date.now();
   let error = null;
 
+  // ── Mock-replay: intercept XHR/fetch and return recorded responses ──────────
+  // Build URL → response queue Map (same URL called N times → consumed in order).
+  let mockMap = null;
+  let mockCursors = null;
+  async function setupMockRoutes() {
+    mockMap = new Map();
+    mockCursors = new Map();
+    for (const r of recorded) {
+      const key = canonicalUrl(r.url, opts.stripParams);
+      if (!mockMap.has(key)) mockMap.set(key, []);
+      mockMap.get(key).push(r);
+    }
+    await page.route("**/*", async (route) => {
+      const req = route.request();
+      if (req.resourceType() !== "xhr" && req.resourceType() !== "fetch")
+        return route.continue();
+      const key = canonicalUrl(req.url(), opts.stripParams);
+      const queue = mockMap.get(key);
+      const cursor = mockCursors.get(key) ?? 0;
+      const rec = queue?.[cursor];
+      if (!rec || rec.body === null) return route.continue();
+      mockCursors.set(key, cursor + 1);
+      if (opts.verbose)
+        console.log(`  ${C.dim}[Mock] ${req.method()} ${req.url()}${C.reset}`);
+      await route.fulfill({
+        status: rec.status,
+        headers: {
+          "content-type": rec.contentType,
+          "access-control-allow-origin": "*",
+          "access-control-allow-headers": "*",
+        },
+        body: rec.body,
+      });
+    });
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   try {
     if (cookies.length > 0) await page.setCookie(...cookies);
 
     const startUrl = applyBaseUrl(rec.url, opts.baseUrl);
     const idleTime = opts.fast ? 200 : 500;
+
+    if (opts.mockReplay) await setupMockRoutes();
 
     if (opts.verbose) console.log(`  ${C.dim}Load: ${startUrl}${C.reset}`);
     const waitUntil = opts.fast ? "domcontentloaded" : "networkidle2";
@@ -201,6 +240,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   } finally {
     page.off("pageerror", onPageError);
     page.off("response", onResponse);
+    if (opts.mockReplay) await page.unrouteAll().catch(() => {});
     if (pending.size > 0)
       await Promise.race([Promise.allSettled([...pending]), sleep(2000)]);
   }
@@ -212,9 +252,11 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     bodyIgnore: opts.bodyIgnore,
     stripParams: opts.stripParams,
   };
-  const results = opts.httpCompare === false
-    ? buildStatusOnlyResults(replayResponses, compareOpts)
-    : (recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : []);
+  const results = opts.mockReplay
+    ? []
+    : opts.httpCompare === false
+      ? buildStatusOnlyResults(replayResponses, compareOpts)
+      : (recorded.length > 0 ? compareResponses(recorded, replayResponses, compareOpts) : []);
   const toastResults = compareToasts(recordedToasts, replayToasts);
   // When --base-url is used, remap recorded triggeredUrls to the new origin
   // so trigger comparison doesn't fail due to host mismatch.
