@@ -676,6 +676,8 @@ async function runReplay(
     }
 
     const total = events.length;
+    let lastTriggerIdx = -1;
+    let lastTriggerSnapLen = -1;
 
     for (let i = 0; i < total; i++) {
       if (replayCancelled) {
@@ -717,14 +719,23 @@ async function runReplay(
       if (ev.type === "check" || ev.type === "select")
         await waitNetworkIdle();
 
-      if (isTrigger && snapLen >= 0)
+      if (isTrigger && snapLen >= 0) {
         replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
+        lastTriggerIdx = i;
+        lastTriggerSnapLen = snapLen;
+      }
 
       if (i % 5 === 0 || i === total - 1)
         ws.send(
           JSON.stringify({ type: "replay-progress", done: i + 1, total }),
         );
     }
+
+    // Post-loop settlement: catch chained requests fired after the last
+    // event's per-event idle window (e.g. Response A triggers Request B).
+    await waitNetworkIdle();
+    if (lastTriggerIdx >= 0)
+      replayTriggerMap.set(lastTriggerIdx, replayResponseUrls.slice(lastTriggerSnapLen));
   } catch (err) {
     log("fail", `재생 오류: ${err.message}`);
   } finally {

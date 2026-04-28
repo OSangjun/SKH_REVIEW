@@ -129,6 +129,8 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     }
 
     let lastT = 0;
+    let lastTriggerIdx = -1;
+    let lastTriggerSnapLen = -1;
     for (let i = 0; i < events.length; i++) {
       const ev = events[i];
       const delay =
@@ -176,9 +178,18 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
         ev.type === "select";
       if (needsWait) await waitNetworkIdle(page, opts.requestTimeout, idleTime);
 
-      if (isTrigger && snapLen >= 0)
+      if (isTrigger && snapLen >= 0) {
         replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
+        lastTriggerIdx = i;
+        lastTriggerSnapLen = snapLen;
+      }
     }
+
+    // Post-loop settlement: catch chained requests fired after the last
+    // event's per-event idle window (e.g. Response A triggers Request B).
+    await waitNetworkIdle(page, Math.min(opts.requestTimeout, 10000), idleTime);
+    if (lastTriggerIdx >= 0)
+      replayTriggerMap.set(lastTriggerIdx, replayResponseUrls.slice(lastTriggerSnapLen));
   } catch (err) {
     error = err.message;
   } finally {
