@@ -123,11 +123,12 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
       if (!mockMap.has(key)) mockMap.set(key, r);
     }
     mockRequestHandler = async (request) => {
+      if (request.isInterceptResolutionHandled?.()) return;
       const rt = request.resourceType();
-      if (rt !== "xhr" && rt !== "fetch") return request.continue();
+      if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
       const key = canonicalUrl(request.url(), opts.stripParams);
       const rec = mockMap.get(key);
-      if (!rec || rec.body === null) return request.continue();
+      if (!rec || rec.body === null) return request.continue().catch(() => {});
       if (opts.verbose)
         console.log(`  ${C.dim}[Mock] ${request.method()} ${request.url()}${C.reset}`);
       await request.respond({
@@ -138,7 +139,7 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
           "access-control-allow-headers": "*",
         },
         body: rec.body,
-      });
+      }).catch(() => {});
     };
     await page.setRequestInterception(true);
     page.on("request", mockRequestHandler);

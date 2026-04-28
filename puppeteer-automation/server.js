@@ -654,6 +654,8 @@ async function runReplay(
   };
   activePage.on("response", onResponse);
 
+  let mockRequestHandler = null;
+
   try {
     firstNavigateDone = false;
 
@@ -685,7 +687,6 @@ async function runReplay(
     // 4. Set up mock request interception before navigation.
     //    Same URL (including query params) always returns the same recorded
     //    response — no queue consumption.
-    let mockRequestHandler = null;
     if (mockReplay) {
       const mockMap = new Map();
       for (const r of recordedResponses) {
@@ -693,11 +694,12 @@ async function runReplay(
         if (!mockMap.has(key)) mockMap.set(key, r);
       }
       mockRequestHandler = async (request) => {
+        if (request.isInterceptResolutionHandled?.()) return;
         const rt = request.resourceType();
-        if (rt !== "xhr" && rt !== "fetch") return request.continue();
+        if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
         const key = canonicalUrl(request.url());
         const rec = mockMap.get(key);
-        if (!rec || rec.body === null) return request.continue();
+        if (!rec || rec.body === null) return request.continue().catch(() => {});
         log("info", `[Mock] ${request.method()} ${request.url()}`);
         await request.respond({
           status: rec.status,
@@ -707,7 +709,7 @@ async function runReplay(
             "access-control-allow-headers": "*",
           },
           body: rec.body,
-        });
+        }).catch(() => {});
       };
       await activePage.setRequestInterception(true);
       activePage.on("request", mockRequestHandler);

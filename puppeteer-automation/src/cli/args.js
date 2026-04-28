@@ -25,7 +25,7 @@ function parseArgs() {
     retry: 0,
     parallel: 1,
     httpCompare: true,
-    mockReplay: false,
+    mockReplay: true,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -54,6 +54,7 @@ function parseArgs() {
       case "--parallel":         opts.parallel = +args[++i]; break;
       case "--no-http-compare":  opts.httpCompare = false; break;
       case "--mock-replay":      opts.mockReplay = true; break;
+      case "--no-mock-replay":   opts.mockReplay = false; break;
       case "--help":
       case "-h":              printHelp(); process.exit(0); break;
       default:
@@ -123,11 +124,9 @@ ${C.bold}Reliability / performance:${C.reset}
   --no-http-compare        Skip HTTP response body comparison. Only checks
                            that each API call returned a 2xx status code.
                            Toast and trigger mapping checks still run.
-  --mock-replay            Intercept every XHR/fetch request and return the
-                           recorded response instead of hitting the real server.
-                           Lets tests run without a live backend. Requests with
-                           no recorded response (or body=null) are passed through.
-                           HTTP body comparison is skipped in this mode.
+  --no-mock-replay         Disable mock replay and send requests to the real
+                           server (mock replay is ON by default).
+  --mock-replay            Force mock replay on (already the default).
 
 ${C.bold}Cookie options (override recording cookies, higher priority):${C.reset}
   --cookie <spec>          Add a cookie. Format:

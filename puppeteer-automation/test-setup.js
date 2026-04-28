@@ -358,6 +358,28 @@ async function main() {
   await new Promise(r => server2.listen(PORT, "127.0.0.1", r));
   console.log(`✓ 재생용 서버 재기동: ${BASE}\n`);
 
+  // ── 실서버 비교 모드 ──────────────────────────────────────────────────────
+  console.log("\n═══════════════════════════════════════════════════");
+  console.log("  실서버 응답 비교 모드 (--no-mock-replay)");
+  console.log("═══════════════════════════════════════════════════\n");
+
+  await new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      ["run-tests.js", "--all", "--base-url", BASE, "--fast", "--no-mock-replay", "--verbose"],
+      { cwd: __dirname, stdio: "inherit" }
+    );
+    child.on("exit", code => {
+      console.log(`\nrun-tests.js (no-mock) 종료 코드: ${code}`);
+      resolve(code);
+    });
+  });
+
+  // ── 목(Mock) 리플레이 모드 (기본값) ──────────────────────────────────────
+  console.log("\n═══════════════════════════════════════════════════");
+  console.log("  목(Mock) 리플레이 모드 (기본값)");
+  console.log("═══════════════════════════════════════════════════\n");
+
   await new Promise((resolve) => {
     const child = spawn(
       process.execPath,
@@ -365,25 +387,7 @@ async function main() {
       { cwd: __dirname, stdio: "inherit" }
     );
     child.on("exit", code => {
-      console.log(`\nrun-tests.js 종료 코드: ${code}`);
-      resolve(code);
-    });
-  });
-
-  // ── Mock-replay 모드 테스트 ───────────────────────────────────────────────
-  console.log("\n═══════════════════════════════════════════════════");
-  console.log("  목(Mock) 리플레이 모드 테스트");
-  console.log("  (XHR/fetch는 녹화 응답으로 가로채, HTTP 비교 생략)");
-  console.log("═══════════════════════════════════════════════════\n");
-
-  await new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      ["run-tests.js", "--all", "--base-url", BASE, "--fast", "--mock-replay", "--verbose"],
-      { cwd: __dirname, stdio: "inherit" }
-    );
-    child.on("exit", code => {
-      console.log(`\nrun-tests.js (mock) 종료 코드: ${code}`);
+      console.log(`\nrun-tests.js (mock, default) 종료 코드: ${code}`);
       resolve(code);
     });
   });
