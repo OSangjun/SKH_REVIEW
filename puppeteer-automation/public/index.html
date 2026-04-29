@@ -12,7 +12,8 @@
   <header id="toolbar">
     <div id="address-bar">
       <span class="bar-icon">🌐</span>
-      <input id="url-input" type="text" placeholder="https://example.com 입력 후 Enter 또는 이동 클릭" autocomplete="off" spellcheck="false" />
+      <input id="url-input" type="text" list="url-history" placeholder="https://example.com 입력 후 Enter 또는 이동 클릭" spellcheck="false" />
+      <datalist id="url-history"></datalist>
       <button id="go-btn" class="btn btn-go">이동</button>
     </div>
 

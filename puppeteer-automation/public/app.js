@@ -54,6 +54,43 @@
   let viewport      = { width: 1280, height: 720 };
   let replayingName = '';
 
+  // ── localStorage persistence ──────────────────────────────────────────────────
+  const LS_URL_KEY    = 'bat_url_history';
+  const LS_COOKIE_KEY = 'bat_cookie_rows';
+  const URL_HIST_MAX  = 30;
+
+  function loadUrlHistory() {
+    try { return JSON.parse(localStorage.getItem(LS_URL_KEY) || '[]'); } catch { return []; }
+  }
+  function saveUrlHistory(url) {
+    if (!url || !/^https?:\/\//i.test(url)) return;
+    let hist = loadUrlHistory().filter(u => u !== url);
+    hist.unshift(url);
+    hist = hist.slice(0, URL_HIST_MAX);
+    localStorage.setItem(LS_URL_KEY, JSON.stringify(hist));
+    refreshUrlDatalist(hist);
+  }
+  function refreshUrlDatalist(hist) {
+    const dl = document.getElementById('url-history');
+    if (!dl) return;
+    dl.innerHTML = hist.map(u => `<option value="${esc(u)}"></option>`).join('');
+  }
+  // Populate datalist from saved history on load
+  refreshUrlDatalist(loadUrlHistory());
+
+  function saveCookiesToStorage() {
+    const rows = Array.from(cookieTbody.querySelectorAll('tr')).map(tr => {
+      const g = f => tr.querySelector(`[data-field="${f}"]`);
+      return { name: g('name').value, value: g('value').value,
+               domain: g('domain').value, path: g('path').value || '/',
+               secure: g('secure').checked, httpOnly: g('httpOnly').checked };
+    }).filter(c => c.name && c.value);
+    localStorage.setItem(LS_COOKIE_KEY, JSON.stringify(rows));
+  }
+  function loadCookiesFromStorage() {
+    try { return JSON.parse(localStorage.getItem(LS_COOKIE_KEY) || '[]'); } catch { return []; }
+  }
+
   // ── Status helper ─────────────────────────────────────────────────────────────
   function setStatus(msg) { statusText.textContent = msg; }
 
@@ -337,6 +374,7 @@
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
     urlInput.value = url;
+    saveUrlHistory(url);
     setStatus(`로드 중: ${url}`);
     send({ type: 'navigate', url });
   }
@@ -770,6 +808,14 @@
   }
 
   cookieBtn.addEventListener('click', () => {
+    // Restore previously saved cookies when table is empty
+    if (cookieTbody.children.length === 0) {
+      loadCookiesFromStorage().forEach(c =>
+        cookieTbody.appendChild(makeCookieRow(c.name, c.value, c.domain || '', c.path || '/', c.secure, c.httpOnly))
+      );
+      if (cookieTbody.children.length > 0)
+        cookieBtn.classList.add('has-cookies');
+    }
     cookieModal.classList.remove('hidden');
   });
   document.getElementById('cookie-modal-close').addEventListener('click', () => {
@@ -784,9 +830,11 @@
   cookieClear.addEventListener('click', () => {
     cookieTbody.innerHTML = '';
     cookieBtn.classList.remove('has-cookies');
+    localStorage.removeItem(LS_COOKIE_KEY);
   });
   cookieApply.addEventListener('click', () => {
     const cookies = readCookieRows();
+    saveCookiesToStorage();
     send({ type: 'set-cookies', cookies });
     cookieBtn.classList.toggle('has-cookies', cookies.length > 0);
     cookieModal.classList.add('hidden');

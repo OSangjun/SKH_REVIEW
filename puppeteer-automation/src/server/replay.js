@@ -19,6 +19,13 @@ const { send, log } = require("./comms");
 // Events that typically trigger network requests and warrant idle-waiting
 const NETWORK_EVENTS = new Set(["navigate", "click", "dblclick"]);
 
+// Passive gesture events — no UI state change, no settle delay needed
+const NO_SETTLE_EVTS = new Set(["wheel", "scroll", "hover", "mousemove", "mouseup", "mousedown"]);
+// Milliseconds to pause after each user-action event so that Vue/React
+// reactivity, CSS transitions, and component state updates can complete
+// before the next action is dispatched.
+const UI_SETTLE_MS = 150;
+
 const BTN = (b) => (b === "right" ? "right" : b === "middle" ? "middle" : "left");
 
 function sleep(ms) {
@@ -448,6 +455,10 @@ async function runReplay(
         await waitNetworkIdle();
       if (ev.type === "check" || ev.type === "select")
         await waitNetworkIdle();
+
+      // Let the UI react: give Vue/React reactivity, CSS transitions, and
+      // component updates time to complete before the next action fires.
+      if (!NO_SETTLE_EVTS.has(ev.type)) await sleep(UI_SETTLE_MS);
 
       if (isTrigger && snapLen >= 0) {
         replayTriggerMap.set(i, replayResponseUrls.slice(snapLen));
