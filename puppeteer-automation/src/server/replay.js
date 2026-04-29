@@ -199,6 +199,8 @@ async function dispatchReplayEvent(ev) {
             log("warn", `  [Click] 선택자 오류, 좌표 폴백: ${ev.selector} — ${selErr.message}`);
           }
         }
+        if (!ev.selector)
+          log("info", `  [Click] 셀렉터 없음, 좌표 클릭: (${ev.x},${ev.y})`);
         await state.activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
       case "dblclick":
@@ -215,6 +217,8 @@ async function dispatchReplayEvent(ev) {
             log("warn", `  [DblClick] 선택자 오류, 좌표 폴백: ${ev.selector} — ${selErr.message}`);
           }
         }
+        if (!ev.selector)
+          log("info", `  [DblClick] 셀렉터 없음, 좌표 클릭: (${ev.x},${ev.y})`);
         await state.activePage.mouse.click(ev.x, ev.y, { clickCount: 2 });
         break;
       case "hover":
