@@ -73,7 +73,7 @@
   function refreshUrlDatalist(hist) {
     const dl = document.getElementById('url-history');
     if (!dl) return;
-    dl.innerHTML = hist.map(u => `<option value="${esc(u)}"></option>`).join('');
+    dl.innerHTML = hist.map(u => `<option value="${esc(u)}" label="${esc(u)}"></option>`).join('');
   }
   // Populate datalist from saved history on load
   refreshUrlDatalist(loadUrlHistory());
@@ -399,6 +399,7 @@
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
     urlInput.value = url;
+    urlInput.blur();
     saveUrlHistory(url);
     setStatus(`로드 중: ${url}`);
     send({ type: 'navigate', url });

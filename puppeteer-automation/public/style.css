@@ -692,17 +692,17 @@ body.log-collapsed #log-body { display: none; }
   font-weight: 600;
 }
 
-/* ── Replay progress overlay ─────────────────────────────────────────────── */
+/* ── Replay progress overlay (canvas 영역에만 적용) ──────────────────────── */
 #replay-overlay {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  background: rgba(0,0,0,.55);
+  background: rgba(0,0,0,.30);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 16px;
-  z-index: 9999;
+  z-index: 100;
   pointer-events: none;
   opacity: 0;
   transition: opacity .2s;
@@ -712,7 +712,8 @@ body.log-collapsed #log-body { display: none; }
   pointer-events: all;
 }
 #replay-overlay .ov-box {
-  background: var(--bg2);
+  background: rgba(37, 37, 38, 0.88);
+  backdrop-filter: blur(4px);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 28px 36px;
