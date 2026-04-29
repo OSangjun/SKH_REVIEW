@@ -2,7 +2,7 @@
 
 const { mergeCookies } = require("./cookies");
 const C = require("./colors");
-const { applyBaseUrl, canonicalUrl, pageKey } = require("../shared/url");
+const { applyBaseUrl, canonicalUrl, pathUrl, pageKey } = require("../shared/url");
 const { isApiResponse } = require("../shared/api-filter");
 const { isBlockedUrl, isTrackerUrl } = require("../shared/blocklist");
 const { openDb } = require("../shared/db");
@@ -84,7 +84,8 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     if (!isApiResponse(response)) return;
     if (isTrackerUrl(url)) return;
     if (isBlockedUrl(url, opts.ignoreHosts, opts.ignoreUrlPatterns)) return;
-    replayResponseUrls.push(url);
+    const purl = pathUrl(url); // path-only for environment-portable comparison
+    replayResponseUrls.push(purl);
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
@@ -93,16 +94,16 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
     const reqBody = method !== "GET" && method !== "HEAD" ? (req.postData() ?? null) : null;
 
     if (!wantBody) {
-      replayResponses.push({ url, status, contentType: ct, body: null, method, reqBody });
+      replayResponses.push({ url: purl, status, contentType: ct, body: null, method, reqBody });
       return;
     }
     const p = response.buffer()
       .then((buf) => {
         const body = buf.toString("utf8");
-        replayResponses.push({ url, status, contentType: ct, body, method, reqBody });
+        replayResponses.push({ url: purl, status, contentType: ct, body, method, reqBody });
       })
       .catch(() =>
-        replayResponses.push({ url, status, contentType: ct, body: null, method, reqBody }),
+        replayResponses.push({ url: purl, status, contentType: ct, body: null, method, reqBody }),
       )
       .finally(() => pending.delete(p));
     pending.add(p);
@@ -119,6 +120,10 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   let mockRequestHandler = null;
   async function setupMockRoutes() {
     mockMap = new Map();
+    // Keys: canonicalUrl(pathUrl(url)) — origin stripped + cache-busters stripped
+    // so recordings are portable across local / dev / production environments.
+    const mkKey = (url) => canonicalUrl(pathUrl(url), opts.stripParams);
+
     // Load the '초기화' recording for this URL as baseline so page-load API
     // calls are served even when they weren't captured in the test recording.
     // Same strategy as server mock mode — test recording overwrites same keys.
@@ -129,19 +134,19 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
       ).get(rec.url);
       if (initRow?.responses) {
         for (const r of tryJson(initRow.responses, []))
-          mockMap.set(canonicalUrl(r.url, opts.stripParams), r);
+          mockMap.set(mkKey(r.url), r);
       }
       _db.close();
     } catch {}
     // Test recording responses override init (last-write-wins).
     for (const r of recorded) {
-      mockMap.set(canonicalUrl(r.url, opts.stripParams), r);
+      mockMap.set(mkKey(r.url), r);
     }
     mockRequestHandler = async (request) => {
       if (request.isInterceptResolutionHandled?.()) return;
       const rt = request.resourceType();
       if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
-      const key = canonicalUrl(request.url(), opts.stripParams);
+      const key = mkKey(request.url());
       const mock = mockMap.get(key);
       if (!mock || mock.body === null) {
         // Block unmatched XHR/fetch — same isolation behaviour as server mock mode.

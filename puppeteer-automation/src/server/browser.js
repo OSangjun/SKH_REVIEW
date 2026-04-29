@@ -4,6 +4,7 @@ const puppeteer = require("puppeteer-core");
 const { buildCaptureScript } = require("./inject");
 const { isApiResponse } = require("../shared/api-filter");
 const { isTrackerUrl } = require("../shared/blocklist");
+const { pathUrl } = require("../shared/url");
 const state = require("./state");
 const { send } = require("./comms");
 
@@ -105,9 +106,10 @@ async function launchSession(chromePath, viewport) {
     const wantBody = /json|text\/plain|xml/.test(ct);
     const status = response.status();
     const t = Date.now() - (state.recordingStartTime ?? Date.now());
+    const purl = pathUrl(url); // store path-only for environment portability
 
     if (!wantBody) {
-      state.capturedResponses.push({ url, status, contentType: ct, body: null, t });
+      state.capturedResponses.push({ url: purl, status, contentType: ct, body: null, t });
       return;
     }
 
@@ -115,10 +117,10 @@ async function launchSession(chromePath, viewport) {
       .buffer()
       .then((buf) => {
         const body = buf.toString("utf8");
-        state.capturedResponses.push({ url, status, contentType: ct, body, t });
+        state.capturedResponses.push({ url: purl, status, contentType: ct, body, t });
       })
       .catch(() => {
-        state.capturedResponses.push({ url, status, contentType: ct, body: null, t });
+        state.capturedResponses.push({ url: purl, status, contentType: ct, body: null, t });
       })
       .finally(() => state.pendingRespPromises.delete(p));
 

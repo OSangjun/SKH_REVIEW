@@ -1,15 +1,21 @@
 "use strict";
 
-const { canonicalUrl, normalizeUrl } = require("./url");
+const { canonicalUrl, pathUrl, normalizeUrl } = require("./url");
 const { isBlockedUrl, isIgnoredBodyPath } = require("./blocklist");
 
-// Group responses by canonicalized URL (cache-buster params stripped). Same
-// URL called N times keeps N entries so positional pairing can compare each
-// occurrence.
+// Matching key: strip origin then strip cache-bust params.
+// Handles both legacy full-URL recordings and new path-only recordings so
+// that test cases remain portable across local / dev / production environments.
+function matchKey(url, stripParams = []) {
+  return canonicalUrl(pathUrl(url), stripParams);
+}
+
+// Group responses by canonicalized path (origin stripped, cache-busters
+// stripped). Same path called N times keeps N entries for positional pairing.
 function buildResponseMap(responses, stripParams = []) {
   const map = new Map();
   for (const r of responses) {
-    const key = canonicalUrl(r.url, stripParams);
+    const key = matchKey(r.url, stripParams);
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(r);
   }
@@ -81,8 +87,8 @@ function compareResponses(recorded, actual, opts = {}) {
   const recMap = buildResponseMap(recorded, stripParams);
   const actMap = buildResponseMap(actual, stripParams);
 
-  // Fallback: group actual responses by path-only URL (all query params
-  // stripped) so session tokens / CSRF params in the URL don't break matching.
+  // Fallback: group actual responses by path-only key (query fully stripped)
+  // so session tokens / CSRF params in the URL don't break matching.
   // We track a per-path consumption index to preserve positional pairing.
   const actPathMap = new Map();
   for (const list of actMap.values()) {
@@ -104,11 +110,10 @@ function compareResponses(recorded, actual, opts = {}) {
       let urlParamsMismatch = false;
 
       if (!act) {
-        // Exact canonical URL not found — try path-only fallback to tolerate
-        // session tokens / dynamic query params that change between runs.
+        // Exact match not found — try path-only fallback (query fully stripped)
+        // to tolerate session tokens / dynamic query params between runs.
         const pk = normalizeUrl(rec.url);
         const pathList = actPathMap.get(pk) ?? [];
-        // Skip items already consumed by a previous exact-match entry for this path
         const exactConsumed = actList.length;
         const cursor = Math.max(actPathCursor.get(pk) ?? 0, exactConsumed);
         if (cursor < pathList.length) {

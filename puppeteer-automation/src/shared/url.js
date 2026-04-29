@@ -7,16 +7,28 @@ const CACHE_BUST_PARAMS = new Set([
   "_", "_t", "_ts", "_=", "nonce", "cb", "cachebust", "timestamp", "v", "version",
 ]);
 
-// Loose URL key for trigger mapping — strips the entire query string.
-// Used by compareTriggerMappings to tolerate cache-buster / nonce values
-// in URLs that the app's network observer should still consider "the same".
+// Strip the origin (protocol + host + port) from a URL, returning only the
+// path + query + hash. When the input is already path-only, it is returned
+// unchanged. This is used so that the same recording works across local,
+// staging, and production environments without modification.
+function pathUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.pathname + u.search + u.hash;
+  } catch {
+    return url; // already path-only or non-standard
+  }
+}
+
+// Loose URL key for trigger mapping — strips the origin AND the entire query
+// string so that trigger URLs match regardless of environment or cache params.
 function normalizeUrl(url) {
   try {
     const u = new URL(url);
-    u.search = "";
-    return u.toString();
+    return u.pathname;
   } catch {
-    return url;
+    // path-only URL — strip query string
+    return url.split("?")[0];
   }
 }
 
@@ -36,12 +48,13 @@ function applyBaseUrl(url, baseUrl) {
 }
 
 // Canonicalize a URL for response comparison: strip query params that are
-// pure cache-busters/nonces so the same logical endpoint matches across
-// runs. Site-specific tokens can be added via `extraStrip`.
+// pure cache-busters/nonces so the same logical endpoint matches across runs.
+// Works on both full URLs ("https://example.com/api?x=1") and path-only URLs
+// ("/api?x=1") so that recordings made with pathUrl storage remain comparable.
 function canonicalUrl(url, extraStrip = []) {
+  const strip = new Set([...CACHE_BUST_PARAMS, ...extraStrip]);
   try {
     const u = new URL(url);
-    const strip = new Set([...CACHE_BUST_PARAMS, ...extraStrip]);
     const keep = [];
     u.searchParams.forEach((value, key) => {
       if (!strip.has(key)) keep.push([key, value]);
@@ -50,7 +63,17 @@ function canonicalUrl(url, extraStrip = []) {
     for (const [k, v] of keep) u.searchParams.append(k, v);
     return u.toString();
   } catch {
-    return url;
+    // path-only URL — strip cache-bust params from query string manually
+    const qIdx = url.indexOf("?");
+    if (qIdx === -1) return url;
+    const path = url.slice(0, qIdx);
+    const params = new URLSearchParams(url.slice(qIdx + 1));
+    const keep = [];
+    params.forEach((value, key) => {
+      if (!strip.has(key)) keep.push([key, value]);
+    });
+    if (keep.length === 0) return path;
+    return path + "?" + new URLSearchParams(keep).toString();
   }
 }
 
@@ -68,6 +91,7 @@ function pageKey(url) {
 
 module.exports = {
   CACHE_BUST_PARAMS,
+  pathUrl,
   normalizeUrl,
   applyBaseUrl,
   canonicalUrl,

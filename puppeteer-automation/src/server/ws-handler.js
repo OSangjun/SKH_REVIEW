@@ -10,6 +10,7 @@ const {
 const { runReplay, mapResponsesToEvents } = require("./replay");
 const { isApiResponse } = require("../shared/api-filter");
 const { isTrackerUrl } = require("../shared/blocklist");
+const { pathUrl } = require("../shared/url");
 const state = require("./state");
 const { send, log } = require("./comms");
 
@@ -43,17 +44,18 @@ async function handleClientMessage(msg) {
           const wantBody = /json|text\/plain|xml/.test(ct);
           const status = response.status();
           const t = Date.now() - initCap.t0;
+          const purl = pathUrl(url); // store path-only for environment portability
           if (!wantBody) {
-            initCap.responses.push({ url, status, contentType: ct, body: null, t });
+            initCap.responses.push({ url: purl, status, contentType: ct, body: null, t });
             return;
           }
           const p = response
             .buffer()
             .then((buf) => {
               const body = buf.toString("utf8");
-              initCap.responses.push({ url, status, contentType: ct, body, t });
+              initCap.responses.push({ url: purl, status, contentType: ct, body, t });
             })
-            .catch(() => initCap.responses.push({ url, status, contentType: ct, body: null, t }))
+            .catch(() => initCap.responses.push({ url: purl, status, contentType: ct, body: null, t }))
             .finally(() => initCap.pending.delete(p));
           initCap.pending.add(p);
         };

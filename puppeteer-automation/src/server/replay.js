@@ -10,7 +10,7 @@ const {
   buildResponseMap,
   isNetworkTrigger,
 } = require("../shared/compare");
-const { canonicalUrl } = require("../shared/url");
+const { canonicalUrl, pathUrl } = require("../shared/url");
 const { pickByLabelOrFirst } = require("../shared/dispatch");
 const { dbSaveHistory, dbGetHistory, dbFindInitByUrl, dbLoadResponses } = require("./db");
 const state = require("./state");
@@ -307,13 +307,14 @@ async function runReplay(
     if (url.startsWith("data:") || url.startsWith("blob:")) return;
     if (!isApiResponse(response)) return;
     if (isTrackerUrl(url)) return;
-    replayResponseUrls.push(url);
+    const purl = pathUrl(url); // path-only for environment-portable comparison
+    replayResponseUrls.push(purl);
     const ct = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();
     const wantBody = /json|text\/plain|xml/.test(ct);
 
     if (!wantBody) {
-      replayResponses.push({ url, status, contentType: ct, body: null });
+      replayResponses.push({ url: purl, status, contentType: ct, body: null });
       return;
     }
 
@@ -321,10 +322,10 @@ async function runReplay(
       .buffer()
       .then((buf) => {
         const body = buf.toString("utf8");
-        replayResponses.push({ url, status, contentType: ct, body });
+        replayResponses.push({ url: purl, status, contentType: ct, body });
       })
       .catch(() =>
-        replayResponses.push({ url, status, contentType: ct, body: null }),
+        replayResponses.push({ url: purl, status, contentType: ct, body: null }),
       )
       .finally(() => replayRespPending.delete(p));
 
@@ -368,19 +369,23 @@ async function runReplay(
       // Every matching request is served from the map — no cursor, repeatable.
       const mockMap = new Map();
 
+      // Keys are canonicalUrl(pathUrl(url)): origin stripped + cache-busters
+      // stripped. This makes recordings portable across local/dev/production.
+      const mkKey = (url) => canonicalUrl(pathUrl(url));
+
       const initId = dbFindInitByUrl(startUrl);
       if (initId) {
         const initResps = dbLoadResponses(initId);
-        for (const r of initResps) mockMap.set(canonicalUrl(r.url), r);
+        for (const r of initResps) mockMap.set(mkKey(r.url), r);
         log("info", `[Mock] 초기화 레코딩 로드 (id=${initId}, ${initResps.length}건)`);
       }
-      for (const r of recordedResponses) mockMap.set(canonicalUrl(r.url), r);
+      for (const r of recordedResponses) mockMap.set(mkKey(r.url), r);
 
       mockRequestHandler = async (request) => {
         if (request.isInterceptResolutionHandled?.()) return;
         const rt = request.resourceType();
         if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
-        const key = canonicalUrl(request.url());
+        const key = mkKey(request.url());
         const rec = mockMap.get(key);
         if (!rec || rec.body === null) {
           log("warn", `[Mock] 미매칭 차단: ${request.url()}`);
