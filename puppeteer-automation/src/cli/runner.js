@@ -118,9 +118,11 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   let mockRequestHandler = null;
   async function setupMockRoutes() {
     mockMap = new Map();
+    // Last-write-wins: later responses for the same URL override earlier ones.
+    // Matching is by URL + query params (cache-busters stripped); same response
+    // is served on every hit — no cursor, repeatable consumption.
     for (const r of recorded) {
-      const key = canonicalUrl(r.url, opts.stripParams);
-      if (!mockMap.has(key)) mockMap.set(key, r);
+      mockMap.set(canonicalUrl(r.url, opts.stripParams), r);
     }
     mockRequestHandler = async (request) => {
       if (request.isInterceptResolutionHandled?.()) return;

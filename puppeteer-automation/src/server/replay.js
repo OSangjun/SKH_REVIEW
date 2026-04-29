@@ -332,34 +332,26 @@ async function runReplay(
 
     // 4. Set up mock request interception before navigation.
     if (mockReplay) {
-      // Build a queue-based map: URL → [response, ...] consumed in order.
-      // Init recording responses serve the initial page load; test recording
-      // responses serve the subsequent interaction-driven API calls.
-      const mockQueues = new Map();
-      const mockCursors = new Map();
-
-      function enqueue(r) {
-        const key = canonicalUrl(r.url);
-        if (!mockQueues.has(key)) mockQueues.set(key, []);
-        mockQueues.get(key).push(r);
-      }
+      // Build URL → response map keyed by canonicalUrl (URL + query params,
+      // cache-busters stripped). Init recording is loaded first as baseline;
+      // test recording overwrites for the same key (last-write-wins).
+      // Every matching request is served from the map — no cursor, repeatable.
+      const mockMap = new Map();
 
       const initId = dbFindInitByUrl(startUrl);
       if (initId) {
         const initResps = dbLoadResponses(initId);
-        for (const r of initResps) enqueue(r);
+        for (const r of initResps) mockMap.set(canonicalUrl(r.url), r);
         log("info", `[Mock] 초기화 레코딩 로드 (id=${initId}, ${initResps.length}건)`);
       }
-      for (const r of recordedResponses) enqueue(r);
+      for (const r of recordedResponses) mockMap.set(canonicalUrl(r.url), r);
 
       mockRequestHandler = async (request) => {
         if (request.isInterceptResolutionHandled?.()) return;
         const rt = request.resourceType();
         if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
         const key = canonicalUrl(request.url());
-        const queue = mockQueues.get(key);
-        const cursor = mockCursors.get(key) ?? 0;
-        const rec = queue?.[cursor];
+        const rec = mockMap.get(key);
         if (!rec || rec.body === null) {
           log("warn", `[Mock] 미매칭 차단: ${request.url()}`);
           return request.respond({
@@ -368,7 +360,6 @@ async function runReplay(
             body: '{"error":"mock: endpoint not recorded"}',
           }).catch(() => {});
         }
-        mockCursors.set(key, cursor + 1);
         log("info", `[Mock] ${request.method()} ${request.url()}`);
         await request.respond({
           status: rec.status,
