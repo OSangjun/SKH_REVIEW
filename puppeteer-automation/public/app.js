@@ -532,12 +532,30 @@
     }
   }
 
+  // Path-only key: pathname without origin — used as fallback to find
+  // recordings made on a different environment (local ↔ staging ↔ prod).
+  function pathKey(url) {
+    if (!url) return '';
+    try { return new URL(url).pathname; } catch { return ''; }
+  }
+
   function renderList() {
-    const curKey = pageKey(currentPageUrl);
-    const visible = curKey
-      ? recordings.filter(r => pageKey(r.url) === curKey)
-      : [];
-    recCount.textContent = `${visible.length}개`;
+    const curKey  = pageKey(currentPageUrl);
+    const curPath = pathKey(currentPageUrl);
+
+    // 1차: origin + pathname 완전 일치
+    let visible   = curKey ? recordings.filter(r => pageKey(r.url) === curKey) : [];
+    let crossEnv  = false;
+
+    // 2차: origin이 다른 경우 pathname만으로 폴백 (다른 환경 레코딩)
+    if (visible.length === 0 && curPath) {
+      visible  = recordings.filter(r => pathKey(r.url) === curPath);
+      crossEnv = visible.length > 0;
+    }
+
+    recCount.textContent = crossEnv
+      ? `${visible.length}개 (다른 환경)`
+      : `${visible.length}개`;
 
     if (recordings.length === 0) {
       recList.innerHTML = '<p class="empty-msg">아직 테스트 케이스가 없습니다.</p>';
