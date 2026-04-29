@@ -12,7 +12,7 @@ const {
 } = require("../shared/compare");
 const { canonicalUrl } = require("../shared/url");
 const { pickByLabelOrFirst } = require("../shared/dispatch");
-const { dbSaveHistory, dbGetHistory } = require("./db");
+const { dbSaveHistory, dbGetHistory, dbFindInitByUrl, dbLoadResponses } = require("./db");
 const state = require("./state");
 const { send, log } = require("./comms");
 
@@ -332,18 +332,43 @@ async function runReplay(
 
     // 4. Set up mock request interception before navigation.
     if (mockReplay) {
-      const mockMap = new Map();
-      for (const r of recordedResponses) {
+      // Build a queue-based map: URL → [response, ...] consumed in order.
+      // Init recording responses serve the initial page load; test recording
+      // responses serve the subsequent interaction-driven API calls.
+      const mockQueues = new Map();
+      const mockCursors = new Map();
+
+      function enqueue(r) {
         const key = canonicalUrl(r.url);
-        if (!mockMap.has(key)) mockMap.set(key, r);
+        if (!mockQueues.has(key)) mockQueues.set(key, []);
+        mockQueues.get(key).push(r);
       }
+
+      const initId = dbFindInitByUrl(startUrl);
+      if (initId) {
+        const initResps = dbLoadResponses(initId);
+        for (const r of initResps) enqueue(r);
+        log("info", `[Mock] 초기화 레코딩 로드 (id=${initId}, ${initResps.length}건)`);
+      }
+      for (const r of recordedResponses) enqueue(r);
+
       mockRequestHandler = async (request) => {
         if (request.isInterceptResolutionHandled?.()) return;
         const rt = request.resourceType();
         if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
         const key = canonicalUrl(request.url());
-        const rec = mockMap.get(key);
-        if (!rec || rec.body === null) return request.continue().catch(() => {});
+        const queue = mockQueues.get(key);
+        const cursor = mockCursors.get(key) ?? 0;
+        const rec = queue?.[cursor];
+        if (!rec || rec.body === null) {
+          log("warn", `[Mock] 미매칭 차단: ${request.url()}`);
+          return request.respond({
+            status: 503,
+            headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+            body: '{"error":"mock: endpoint not recorded"}',
+          }).catch(() => {});
+        }
+        mockCursors.set(key, cursor + 1);
         log("info", `[Mock] ${request.method()} ${request.url()}`);
         await request.respond({
           status: rec.status,

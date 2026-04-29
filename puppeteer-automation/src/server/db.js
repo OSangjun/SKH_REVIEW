@@ -48,6 +48,9 @@ const stmts = {
   ),
   updateName: db.prepare(`UPDATE recordings SET name = ? WHERE id = ?`),
   updateResponses: db.prepare(`UPDATE recordings SET responses = ? WHERE id = ?`),
+  findInitByUrl: db.prepare(
+    `SELECT id FROM recordings WHERE name = '초기화' AND url = ? ORDER BY id DESC LIMIT 1`,
+  ),
 };
 
 function tryJson(s, def) {
@@ -123,6 +126,10 @@ function dbSaveRecording(name, url, eventCount, createdAt, events, responses, co
 function dbUpdateMeta(id, name, description, tags) {
   stmts.updateMeta.run({ id, name, description, tags: JSON.stringify(tags) });
 }
+function dbFindInitByUrl(url) {
+  const row = stmts.findInitByUrl.get(url);
+  return row ? row.id : null;
+}
 function dbUpdateName(id, name) { stmts.updateName.run(name, id); }
 function dbUpdateResponses(id, responsesJson) { stmts.updateResponses.run(responsesJson, id); }
 function dbDeleteRecording(id) { stmts.deleteRecording.run(id); }
@@ -155,4 +162,5 @@ module.exports = {
   dbSaveRecording, dbUpdateMeta, dbUpdateName, dbUpdateResponses, dbDeleteRecording,
   dbDeleteHistoryByRecording,
   dbGetHistory, dbAllHistory, dbSaveHistory,
+  dbFindInitByUrl,
 };

@@ -287,6 +287,23 @@ function buildCaptureScript() {
       return null;
     }
 
+    // Walk up the frame chain summing iframe rects to convert iframe-local
+    // clientX/Y to main-page viewport coordinates. Cross-origin frames
+    // (where frameElement is null) terminate the walk gracefully.
+    function getFrameOffset() {
+      var x = 0, y = 0;
+      try {
+        var win = window;
+        while (win.frameElement && win !== win.top) {
+          var rect = win.frameElement.getBoundingClientRect();
+          x += rect.left;
+          y += rect.top;
+          win = win.parent;
+        }
+      } catch (ignore) {}
+      return { x: x, y: y };
+    }
+
     function withTarget(base, el) {
       var target = nearestInteractive(el);
       var sel = getSelector(target);
@@ -320,7 +337,8 @@ function buildCaptureScript() {
     }
 
     document.addEventListener('click', e => {
-      var base = { x: e.clientX, y: e.clientY, button: btn(e.button) };
+      var off = getFrameOffset();
+      var base = { x: e.clientX + off.x, y: e.clientY + off.y, button: btn(e.button) };
       // For El Plus dropdown options, record which select triggered this popup
       var rawTarget = nearestInteractive(e.target);
       var rawCls = typeof rawTarget.className === 'string' ? rawTarget.className : '';
@@ -333,7 +351,8 @@ function buildCaptureScript() {
     }, true);
 
     document.addEventListener('dblclick', e => {
-      cap('dblclick', withTarget({ x: e.clientX, y: e.clientY }, e.target));
+      var off = getFrameOffset();
+      cap('dblclick', withTarget({ x: e.clientX + off.x, y: e.clientY + off.y }, e.target));
     }, true);
 
     document.addEventListener('wheel',
