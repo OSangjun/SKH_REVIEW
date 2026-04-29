@@ -73,6 +73,20 @@ html, body {
   overflow: hidden;
 }
 
+/* ── Icons ──────────────────────────────────────────────────────────────────
+   All UI icons are inline SVG with `class="icon"`. They inherit text color
+   via `currentColor` and align to the baseline of the surrounding label.
+   See public/icons.js for the icon set. */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  vertical-align: -3px;
+  pointer-events: none;
+}
+.icon-sm { width: 14px; height: 14px; }
+.icon-lg { width: 20px; height: 20px; }
+
 /* ── Toolbar ─────────────────────────────────────────────────────────────── */
 #toolbar {
   height: var(--toolbar-h);
@@ -101,11 +115,14 @@ html, body {
 }
 
 .bar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 var(--gap-2);
-  font-size: 14px;
   flex-shrink: 0;
   color: var(--text-mid);
 }
+.bar-icon .icon { width: 16px; height: 16px; }
 
 /* Inline icon button (… for URL tree) flush-left of the address bar */
 .bar-icon-btn {
@@ -116,10 +133,9 @@ html, body {
   cursor: pointer;
   height: 100%;
   padding: 0 10px;
-  font: inherit;
-  font-size: 16px;
-  letter-spacing: 1px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   transition: background .15s, color .15s;
   flex-shrink: 0;
 }
@@ -128,6 +144,7 @@ html, body {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.bar-icon-btn .icon { width: 18px; height: 18px; }
 
 /* URL tree popup — anchored under the … button.
    Built as a fixed-position panel so it overlays the canvas/iframe area. */
@@ -202,12 +219,14 @@ html, body {
 .url-tree-origin:hover { background: var(--bg3); }
 .url-tree-origin .twist {
   width: 14px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
   transition: transform .15s;
-  font-size: 9px;
   flex-shrink: 0;
 }
+.url-tree-origin .twist .icon { width: 12px; height: 12px; }
 .url-tree-origin.expanded .twist { transform: rotate(90deg); }
 .url-tree-origin .origin-host {
   flex: 1;
@@ -447,11 +466,16 @@ body.log-collapsed #log-panel { height: var(--log-hdr-h); }
   user-select: none;
 }
 .log-toggle {
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
   transition: transform .2s;
   line-height: 1;
+  width: 16px;
+  height: 16px;
 }
+.log-toggle .icon { width: 14px; height: 14px; }
 body.log-collapsed .log-toggle { transform: rotate(-90deg); }
 
 .log-title {
@@ -571,20 +595,64 @@ body.log-collapsed #log-body { display: none; }
 }
 
 /* Empty-canvas hint shown when no URL has been navigated yet (about:blank).
-   The frame-url label drives visibility via [data-blank] attribute on the
-   canvas-wrap, set by app.js when url is about:blank. */
+   Visibility is driven by data-blank="1" set on .canvas-wrap from app.js. */
 .canvas-wrap[data-blank="1"]::before {
-  content: "🌐  URL을 입력하고 [이동] 또는 Enter 를 누르세요";
+  content: "URL을 입력하고 [이동] 또는 Enter 를 누르세요";
   position: absolute;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 14px;
+  transform: translate(-50%, calc(-50% + 18px));
+  font-size: 13px;
   color: var(--text-dim);
-  letter-spacing: .02em;
+  letter-spacing: .01em;
   pointer-events: none;
   user-select: none;
 }
+/* SVG globe icon above the empty-canvas message — rendered as a CSS mask
+   so it inherits the dim color and stays consistent with other SVG icons. */
+.canvas-wrap[data-blank="1"]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, calc(-50% - 14px));
+  width: 36px;
+  height: 36px;
+  background: var(--text-dim);
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><path d='M2 12h20'/><path d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='12' r='10'/><path d='M2 12h20'/><path d='M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z'/></svg>");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  pointer-events: none;
+  opacity: .6;
+}
+
+/* Result badge layout when icon is an inline SVG */
+.result-badge { display: inline-flex; align-items: center; gap: 8px; }
+.result-badge .rb-icon { display: inline-flex; }
+.result-badge .rb-icon .icon { width: 18px; height: 18px; }
+.result-badge .rb-extras {
+  display: inline-flex;
+  gap: 8px;
+  font-size: 12px;
+  opacity: .85;
+  align-items: center;
+}
+.result-badge .rb-extras .icon { width: 14px; height: 14px; }
+
+/* Suite-result row inside replay overlay — pass/fail colored counts */
+#replay-overlay .ov-suite-result {
+  display: inline-flex;
+  gap: 18px;
+  justify-content: center;
+}
+#replay-overlay .ov-pass { color: var(--replay-color); display: inline-flex; align-items: center; gap: 6px; }
+#replay-overlay .ov-fail { color: var(--rec-color);    display: inline-flex; align-items: center; gap: 6px; }
+#replay-overlay .ov-title { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 
 /* ── Replay result badge (top-right of canvas area) ─────────────────────── */
 .result-badge {
@@ -722,14 +790,17 @@ body.log-collapsed #log-body { display: none; }
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  padding: 0 2px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-sm);
   transition: color .15s, background .15s;
 }
-.rec-del:hover  { color: var(--rec-color); background: rgba(231,76,60,.12); }
-.rec-edit:hover { color: #f59e0b; }
+.rec-del .icon, .rec-edit .icon { width: 14px; height: 14px; }
+.rec-del:hover  { color: var(--rec-color);  background: var(--rec-soft); }
+.rec-edit:hover { color: var(--warn-color); background: var(--warn-soft); }
 
 /* name & description */
 .rec-name {

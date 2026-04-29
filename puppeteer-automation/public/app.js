@@ -2,6 +2,28 @@
 (function () {
   'use strict';
 
+  // ── Icon helpers ──────────────────────────────────────────────────────────────
+  // Resolve <ANY data-icon="name"> elements into inline SVG. Called once on
+  // load and again after dynamic renders (renderList, renderUrlTree, …).
+  const ICON = (name, cls) => (window.ICONS && window.ICONS[name]) ? window.ICONS[name](cls) : '';
+  function hydrateIcons(root) {
+    root = root || document;
+    const els = root.querySelectorAll('[data-icon]');
+    for (const el of els) {
+      const name = el.dataset.icon;
+      const built = ICON(name);
+      if (!built) continue;
+      // Replace text content of element with the SVG. Idempotent — empty
+      // out then set so re-hydration on the same element is safe.
+      el.innerHTML = built;
+      // Mark as hydrated so we can debug double-hydration without surprises
+      el.dataset.iconHydrated = '1';
+    }
+  }
+  // Initial pass — on DOMContentLoaded the script runs at end of body so
+  // elements already exist; just hydrate now.
+  hydrateIcons();
+
   // ── DOM refs ──────────────────────────────────────────────────────────────────
   const urlInput      = document.getElementById('url-input');
   const goBtn         = document.getElementById('go-btn');
@@ -266,7 +288,7 @@
         suiteMode  = true;
         suitePass  = 0;
         suiteFail  = 0;
-        ovTitle.textContent = '⚡ 스위트 실행 중';
+        ovTitle.innerHTML = `${ICON('zap')} 스위트 실행 중`;
         ovSuiteInfo.textContent = `0 / ${msg.total}`;
         ovSuiteInfo.classList.remove('hidden');
         ovSuiteResult.textContent = '';
@@ -287,19 +309,21 @@
       case 'suite-item-done':
         if (msg.failed === 0) suitePass++;
         else suiteFail++;
-        ovSuiteResult.textContent = `✅ ${suitePass}  ❌ ${suiteFail}`;
+        ovSuiteResult.innerHTML =
+          `<span class="ov-pass">${ICON('checkCircle')} ${suitePass}</span>` +
+          `<span class="ov-fail">${ICON('xCircle')} ${suiteFail}</span>`;
         break;
 
       case 'suite-done':
         suiteMode = false;
         overlay.classList.remove('visible');
-        ovTitle.textContent = '▶ 재생 중';
+        ovTitle.innerHTML = `${ICON('play')} 재생 중`;
         ovSuiteInfo.classList.add('hidden');
         ovSuiteResult.classList.add('hidden');
         replayBtn.disabled = selectedId === null;
         recordBtn.disabled = false;
         updateSuiteBtn();
-        setStatus(`스위트 완료 ${msg.failed === 0 ? '✅' : '❌'} — 성공 ${msg.passed} / 실패 ${msg.failed} (총 ${msg.total}개)`);
+        setStatus(`스위트 완료 — 성공 ${msg.passed} / 실패 ${msg.failed} (총 ${msg.total}개)`);
         break;
 
       case 'replay-result':
@@ -480,7 +504,7 @@
       }).join('');
       return `
         <button class="url-tree-origin ${expanded ? 'expanded' : ''}" data-origin="${esc(origin)}">
-          <span class="twist">▶</span>
+          <span class="twist">${ICON('chevronRight')}</span>
           <span class="origin-host">${esc(origin)}</span>
           <span class="origin-count">${paths.size}</span>
         </button>
@@ -645,9 +669,9 @@
     const busy = isReplaying || suiteMode;
     const empty = recordings.length === 0;
     suiteBtn.disabled = empty || busy;
-    suiteBtn.textContent = checkedIds.size > 0
-      ? `⚡ 스위트 (${checkedIds.size})`
-      : '⚡ 스위트';
+    suiteBtn.innerHTML = checkedIds.size > 0
+      ? `${ICON('zap')} 스위트 (${checkedIds.size})`
+      : `${ICON('zap')} 스위트`;
     suiteBtn.title = empty  ? '테스트 케이스가 없습니다'
       : suiteMode           ? '스위트 실행 중'
       : isReplaying         ? '재생 중 — 완료 후 사용 가능'
@@ -757,8 +781,8 @@
       <span class="rec-num">#${rec.id}</span>
     </div>
     <div style="display:flex;gap:4px;align-items:center">
-      <button class="rec-edit" data-id="${rec.id}" title="이름/설명/태그 편집">✏️</button>
-      <button class="rec-del"  data-id="${rec.id}" title="삭제">✕</button>
+      <button class="rec-edit" data-id="${rec.id}" title="이름/설명/태그 편집" aria-label="편집">${ICON('edit')}</button>
+      <button class="rec-del"  data-id="${rec.id}" title="삭제" aria-label="삭제">${ICON('trash')}</button>
     </div>
   </div>
   <div class="rec-name" data-id="${rec.id}">${esc(rec.name)}</div>
@@ -771,12 +795,12 @@
     <span>${fmtTime(rec.createdAt)}</span>
   </div>
   <div class="rec-actions">
-    <button class="btn-rec-replay" data-id="${rec.id}">▶ 재생</button>
+    <button class="btn-rec-replay" data-id="${rec.id}">${ICON('play')} 재생</button>
   </div>
   <div class="rec-export">
-    <button class="btn-rec-http"   data-id="${rec.id}" title="HTTP 응답 열람/편집">🌐 HTTP</button>
-    <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">📥 JSON</button>
-    <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">📜 Script</button>
+    <button class="btn-rec-http"   data-id="${rec.id}" title="HTTP 응답 열람/편집">${ICON('server')} HTTP</button>
+    <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">${ICON('braces')} JSON</button>
+    <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">${ICON('code')} Script</button>
   </div>
   <div class="rec-edit-form hidden" data-id="${rec.id}">
     <input  class="edit-name-input"  type="text"     value="${esc(rec.name)}"  placeholder="이름" />
@@ -949,27 +973,29 @@
       return;
     }
 
-    let cls, icon, text;
+    let cls, iconSvg, text;
+    const extras = [];
     if (totalFail === 0 && jsFail === 0) {
       cls  = 'pass';
-      icon = '✅';
+      iconSvg = ICON('checkCircle');
       text = `SUCCESS  ${passed}/${total}`;
-      if (toastResults && toastResults.length) text += `  🔔${toastResults.length}`;
-      if (triggerResults && triggerResults.length) text += `  🔗${triggerResults.length}`;
+      if (toastResults && toastResults.length) extras.push(`${ICON('bell')} ${toastResults.length}`);
+      if (triggerResults && triggerResults.length) extras.push(`${ICON('link')} ${triggerResults.length}`);
     } else if (passed === 0 && totalFail > 0) {
       cls  = 'fail';
-      icon = '❌';
+      iconSvg = ICON('xCircle');
       text = `FAIL  ${totalFail}건 실패`;
-      if (jsFail)      text += `  ⚠JS×${jsFail}`;
-      if (triggerFail) text += `  🔗×${triggerFail}`;
+      if (jsFail)      extras.push(`JS×${jsFail}`);
+      if (triggerFail) extras.push(`${ICON('link')}×${triggerFail}`);
     } else {
       cls  = 'mixed';
-      icon = '⚠️';
+      iconSvg = ICON('xCircle');
       text = `PARTIAL  ${passed} 성공 / ${totalFail} 실패`;
     }
 
     resultBadge.classList.add(cls);
-    resultBadge.innerHTML = `<span class="rb-icon">${icon}</span><span>${text}</span>`;
+    const extrasHtml = extras.length ? `  <span class="rb-extras">${extras.join('  ')}</span>` : '';
+    resultBadge.innerHTML = `<span class="rb-icon">${iconSvg}</span><span>${text}</span>${extrasHtml}`;
 
     updateLogBadge(cls);
 
@@ -988,7 +1014,7 @@
       <td><input class="cookie-input" data-field="path"     value="${esc(path)}"     placeholder="/" style="width:60px" /></td>
       <td style="text-align:center"><input type="checkbox" class="cookie-check" data-field="secure"   ${secure   ? 'checked' : ''} /></td>
       <td style="text-align:center"><input type="checkbox" class="cookie-check" data-field="httpOnly" ${httpOnly ? 'checked' : ''} /></td>
-      <td><button class="cookie-row-del" title="삭제">✕</button></td>`;
+      <td><button class="cookie-row-del" title="삭제" aria-label="삭제">${ICON('x')}</button></td>`;
     tr.querySelector('.cookie-row-del').addEventListener('click', () => tr.remove());
     return tr;
   }
@@ -1102,7 +1128,7 @@
               value="${esc(String(item.status ?? 200))}" data-idx="${idx}" />
           </span>
           <span class="resp-ct">${esc((item.contentType || '').split(';')[0].trim())}</span>
-          <button class="resp-row-del" data-idx="${idx}" title="항목 삭제">✕</button>
+          <button class="resp-row-del" data-idx="${idx}" title="항목 삭제" aria-label="항목 삭제">${ICON('x')}</button>
         </div>
         <div class="resp-url-wrap" title="${esc(item.url || '')}">
           <input class="resp-url-input" type="text" value="${esc(item.url || '')}" data-idx="${idx}" placeholder="URL" />

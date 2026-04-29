@@ -11,8 +11,8 @@
   <!-- ── Toolbar ── -->
   <header id="toolbar">
     <div id="address-bar">
-      <button id="url-tree-btn" class="bar-icon-btn" title="등록된 테스트 케이스 URL 보기" aria-label="등록된 URL 트리 보기">⋯</button>
-      <span class="bar-icon">🌐</span>
+      <button id="url-tree-btn" class="bar-icon-btn" title="등록된 테스트 케이스 URL 보기" aria-label="등록된 URL 트리 보기" data-icon="moreHorizontal"></button>
+      <span class="bar-icon" data-icon="globe"></span>
       <input id="url-input" type="text" list="url-history" placeholder="https://example.com 입력 후 Enter 또는 이동 클릭" spellcheck="false" />
       <datalist id="url-history"></datalist>
       <button id="go-btn" class="btn btn-go">이동</button>
@@ -29,7 +29,7 @@
     </div>
 
     <div id="controls">
-      <button id="cookie-btn" class="btn btn-cookie" title="쿠키 설정">🍪 쿠키</button>
+      <button id="cookie-btn" class="btn btn-cookie" title="쿠키 설정"><span data-icon="cookie"></span> 쿠키</button>
       <button id="record-btn" class="btn btn-record" disabled>
         <span class="dot"></span> 기록
       </button>
@@ -44,7 +44,7 @@
         </select>
       </div>
       <button id="replay-btn" class="btn btn-replay" disabled>
-        ▶ 재생
+        <span data-icon="play"></span> 재생
       </button>
       <label id="http-compare-wrap" title="OFF 시 HTTP 상태코드(2xx)만 확인하고 응답 바디 비교를 건너뜁니다">
         <input type="checkbox" id="http-compare-chk" checked />
@@ -75,7 +75,7 @@
         <!-- ── Replay progress overlay (canvas 영역에만 적용) ── -->
         <div id="replay-overlay">
           <div class="ov-box">
-            <div class="ov-title" id="ov-title">▶ 재생 중</div>
+            <div class="ov-title" id="ov-title"><span data-icon="play"></span> 재생 중</div>
             <div class="ov-suite-info hidden" id="ov-suite-info"></div>
             <div class="ov-name" id="ov-name"></div>
             <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
@@ -93,7 +93,7 @@
         <h2>테스트 케이스 목록</h2>
         <div style="display:flex;gap:6px;align-items:center">
           <span id="rec-count">0개</span>
-          <button id="suite-btn" class="btn btn-suite" disabled title="선택한 테스트 케이스를 순서대로 일괄 실행">⚡ 스위트</button>
+          <button id="suite-btn" class="btn btn-suite" disabled title="선택한 테스트 케이스를 순서대로 일괄 실행"><span data-icon="zap"></span> 스위트</button>
         </div>
       </div>
       <div id="rec-list">
@@ -106,7 +106,7 @@
   <!-- ── Log panel ── -->
   <div id="log-panel">
     <div id="log-header">
-      <span id="log-toggle-btn" class="log-toggle" title="접기/펼치기">▼</span>
+      <span id="log-toggle-btn" class="log-toggle" title="접기/펼치기" data-icon="chevronDown"></span>
       <span class="log-title">터미널</span>
       <span id="log-badge" class="log-badge"></span>
       <button id="log-clear-btn" class="log-clear" title="로그 지우기">지우기</button>
@@ -120,8 +120,8 @@
   <div id="cookie-modal" class="modal-overlay hidden">
     <div class="modal-box">
       <div class="modal-header">
-        <h3>🍪 쿠키 설정</h3>
-        <button id="cookie-modal-close" class="modal-close">✕</button>
+        <h3><span data-icon="cookie"></span> 쿠키 설정</h3>
+        <button id="cookie-modal-close" class="modal-close" data-icon="x" aria-label="닫기"></button>
       </div>
       <p class="modal-desc">이동 전에 브라우저에 주입할 쿠키를 입력하세요. <code>domain</code>을 비워두면 현재 URL의 도메인이 사용됩니다.</p>
       <div class="cookie-table-wrap">
@@ -155,7 +155,7 @@
     <div class="modal-box resp-modal-box">
       <div class="modal-header">
         <h3 id="resp-modal-title">HTTP 응답 목록</h3>
-        <button id="resp-modal-close" class="modal-close">✕</button>
+        <button id="resp-modal-close" class="modal-close" data-icon="x" aria-label="닫기"></button>
       </div>
       <div class="resp-modal-body">
         <div id="resp-list" class="resp-list"></div>
@@ -170,6 +170,7 @@
     </div>
   </div>
 
+  <script src="/icons.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

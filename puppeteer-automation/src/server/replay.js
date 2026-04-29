@@ -481,11 +481,15 @@ async function runReplay(
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
-    // Wait for all initial API calls to settle before dispatching the first
-    // recorded event. domcontentloaded fires before async data-fetching
-    // completes, so without this wait the first click/input can land on a
-    // partially-rendered page.
-    await waitNetworkIdle();
+    // Wait for initial API calls to settle, but with a SHORT timeout —
+    // pages with persistent connections / pollers never reach full idle and
+    // would otherwise leave the overlay stuck on "준비 중…" for the full
+    // 60s default. Best-effort: 6s ceiling, 300ms idle window.
+    await waitNetworkIdle(6000, 300);
+    // Tell the UI that loading has finished and event execution will begin.
+    // Without this, the overlay shows "준비 중…" until the first event
+    // dispatches and the modulo-5 progress emit fires.
+    send({ type: "replay-progress", done: 0, total: events.length });
 
     // 6. Remove the clear-storage script so subsequent navigations within
     //    this replay are not affected.
