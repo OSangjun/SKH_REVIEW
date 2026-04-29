@@ -4,6 +4,10 @@ const fs = require("fs");
 const C = require("./colors");
 const { pageKey } = require("../shared/url");
 
+// Replace newlines with a visible separator so multi-line toast/error text
+// stays on a single logical console line and doesn't look truncated.
+const flatText = (s) => (s ?? "").replace(/\r?\n/g, " ↵ ").trim();
+
 function statusLine(result) {
   if (result.error) return `${C.red}ERROR${C.reset} ${C.dim}(${result.duration.toFixed(1)}s)${C.reset}`;
   const flaky = result.flakyAttempts ? ` ${C.yellow}(flaky x${result.flakyAttempts})${C.reset}` : "";
@@ -84,9 +88,9 @@ function printConsoleResults(suiteResults) {
           }
           for (const r of s.toastResults ?? []) {
             if (r.pass)
-              console.log(`  ${C.green}✓${C.reset} ${C.dim}[Toast]${C.reset} ${r.text}`);
+              console.log(`  ${C.green}✓${C.reset} ${C.dim}[Toast]${C.reset} ${flatText(r.text)}`);
             else
-              console.log(`  ${C.red}✗${C.reset} ${C.dim}[Toast]${C.reset} "${r.text}" — not seen in replay`);
+              console.log(`  ${C.red}✗${C.reset} ${C.dim}[Toast]${C.reset} "${flatText(r.text)}" — not seen in replay`);
           }
           for (const r of s.triggerResults ?? []) {
             if (r.pass)
@@ -203,22 +207,22 @@ function writeJunitReport(suiteResults, outPath) {
         }
         for (const r of s.toastResults ?? []) {
           if (!r.pass) {
-            lines.push(`    <testcase name="[Toast] ${esc(r.text.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);
-            lines.push(`      <failure message="Toast not seen in replay: ${esc(r.text)}" type="ToastMismatch">${esc(r.text)}</failure>`);
+            lines.push(`    <testcase name="[Toast] ${esc(flatText(r.text))}" classname="${esc(s.rec.name)}" time="0">`);
+            lines.push(`      <failure message="Toast not seen in replay: ${esc(flatText(r.text))}" type="ToastMismatch">${esc(r.text)}</failure>`);
             lines.push("    </testcase>");
           }
         }
         for (const r of s.triggerResults ?? []) {
           if (!r.pass) {
-            const name = `[Trigger:${r.eventType}] ${r.url.slice(0, 100)}`;
+            const name = `[Trigger:${r.eventType}] ${r.url}`;
             lines.push(`    <testcase name="${esc(name)}" classname="${esc(s.rec.name)}" time="0">`);
             lines.push(`      <failure message="URL not triggered in replay: ${esc(r.url)}" type="TriggerMismatch">${esc(r.url)}</failure>`);
             lines.push("    </testcase>");
           }
         }
         for (const e of s.jsErrors ?? []) {
-          lines.push(`    <testcase name="[JS Error] ${esc(e.slice(0, 120))}" classname="${esc(s.rec.name)}" time="0">`);
-          lines.push(`      <failure message="${esc(e)}" type="ScriptError">${esc(e)}</failure>`);
+          lines.push(`    <testcase name="[JS Error] ${esc(flatText(e))}" classname="${esc(s.rec.name)}" time="0">`);
+          lines.push(`      <failure message="${esc(flatText(e))}" type="ScriptError">${esc(e)}</failure>`);
           lines.push("    </testcase>");
         }
       }

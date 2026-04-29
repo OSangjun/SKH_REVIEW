@@ -555,8 +555,9 @@ async function runReplay(
     else
       log("fail", `━━ 토스트: FAIL — ${toastFailed}/${toastResults.length}건 불일치 ━━`);
     for (const r of toastResults) {
-      if (r.pass) log("success", `  ✓ [Toast] ${r.text}`);
-      else log("fail", `  ✗ [Toast] "${r.text}" — 재생 시 미감지`);
+      const t = (r.text ?? "").replace(/\r?\n/g, " ↵ ").trim();
+      if (r.pass) log("success", `  ✓ [Toast] ${t}`);
+      else log("fail", `  ✗ [Toast] "${t}" — 재생 시 미감지`);
     }
   }
 
