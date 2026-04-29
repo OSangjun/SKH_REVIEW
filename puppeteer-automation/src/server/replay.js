@@ -43,11 +43,13 @@ async function waitNetworkIdle(timeout = 60000) {
   } catch {}
 }
 
-// Flash the target element with colour-coded glow:
-//   type "click"  → orange outline + light orange background
-//   type "input"  → blue   outline + light blue  background
+// Flash the target element with colour-coded glow + ripple at click coordinates.
+//   type "click"    → orange ripple + orange outline
+//   type "dblclick" → purple ripple + orange outline (double ring)
+//   type "input"    → blue outline only (no ripple)
 async function flashElement(selector, x, y, type = "click") {
   await state.activePage.evaluate((sel, px, py, tp) => {
+    // ── Inject styles once ─────────────────────────────────────────────────
     if (!document.getElementById("__replay-flash-style__")) {
       const s = document.createElement("style");
       s.id = "__replay-flash-style__";
@@ -64,21 +66,74 @@ async function flashElement(selector, x, y, type = "click") {
           "80% {outline:3px solid rgba(59,130,246,0.8) !important;outline-offset:4px !important;background-color:rgba(59,130,246,0.1) !important}" +
           "100%{outline:3px solid rgba(59,130,246,0)   !important;outline-offset:4px !important;background-color:rgba(59,130,246,0)   !important}" +
         "}" +
+        "@keyframes __rfRipple__ {" +
+          "0%  {transform:translate(-50%,-50%) scale(0);opacity:1}" +
+          "100%{transform:translate(-50%,-50%) scale(1);opacity:0}" +
+        "}" +
+        "@keyframes __rfDot__ {" +
+          "0%  {transform:translate(-50%,-50%) scale(1);opacity:1}" +
+          "60% {transform:translate(-50%,-50%) scale(1.4);opacity:1}" +
+          "100%{transform:translate(-50%,-50%) scale(0.8);opacity:0}" +
+        "}" +
         ".__rfClick__{animation:__rfClick__ .7s ease forwards !important}" +
-        ".__rfInput__{animation:__rfInput__ .7s ease forwards !important}";
+        ".__rfInput__{animation:__rfInput__ .7s ease forwards !important}" +
+        ".__rfRipple__{" +
+          "position:fixed;pointer-events:none;border-radius:50%;z-index:2147483647;" +
+          "animation:__rfRipple__ .65s cubic-bezier(0,.5,.5,1) forwards !important" +
+        "}" +
+        ".__rfDot__{" +
+          "position:fixed;pointer-events:none;border-radius:50%;z-index:2147483647;" +
+          "animation:__rfDot__ .45s ease-out forwards !important" +
+        "}";
       document.head.appendChild(s);
     }
+
+    // ── Element outline glow ───────────────────────────────────────────────
     const cls   = tp === "input" ? "__rfInput__" : "__rfClick__";
     const other = tp === "input" ? "__rfClick__" : "__rfInput__";
     let el = null;
     if (sel) { try { el = document.querySelector(sel); } catch {} }
     if (!el && typeof px === "number" && typeof py === "number")
       el = document.elementFromPoint(px, py);
-    if (!el) return;
-    el.classList.remove(cls, other);
-    void el.offsetWidth;
-    el.classList.add(cls);
-    setTimeout(() => el && el.classList.remove(cls), 750);
+    if (el) {
+      el.classList.remove(cls, other);
+      void el.offsetWidth;
+      el.classList.add(cls);
+      setTimeout(() => el && el.classList.remove(cls), 750);
+    }
+
+    // ── Ripple at click coordinates (click / dblclick only) ────────────────
+    if (tp === "input" || typeof px !== "number" || typeof py !== "number") return;
+    const isDbl = tp === "dblclick";
+    const color = isDbl ? "rgba(168,85,247," : "rgba(249,115,22,";
+
+    // Center dot
+    const dot = document.createElement("div");
+    dot.className = "__rfDot__";
+    dot.style.cssText =
+      `left:${px}px;top:${py}px;width:18px;height:18px;` +
+      `background:${color}1);box-shadow:0 0 0 4px ${color}0.4),0 0 12px 4px ${color}0.6)`;
+    document.body.appendChild(dot);
+    setTimeout(() => dot.parentNode && dot.parentNode.removeChild(dot), 500);
+
+    // Expanding rings
+    function makeRing(delay, size) {
+      const r = document.createElement("div");
+      r.className = "__rfRipple__";
+      r.style.cssText =
+        `left:${px}px;top:${py}px;` +
+        `width:${size}px;height:${size}px;` +
+        `border:4px solid ${color}1);` +
+        `background:${color}0.25);` +
+        `box-shadow:0 0 0 2px ${color}0.5),inset 0 0 8px ${color}0.2);` +
+        `animation-delay:${delay}ms !important`;
+      document.body.appendChild(r);
+      setTimeout(() => r.parentNode && r.parentNode.removeChild(r), 700 + delay);
+    }
+
+    makeRing(0,   isDbl ? 120 : 90);
+    makeRing(120, isDbl ? 200 : 150);
+    if (isDbl) makeRing(240, 90); // third ring for dblclick
   }, selector ?? null, x ?? null, y ?? null, type).catch(() => {});
 }
 
@@ -147,7 +202,7 @@ async function dispatchReplayEvent(ev) {
         await state.activePage.mouse.click(ev.x, ev.y, { button: BTN(ev.button) });
         break;
       case "dblclick":
-        flashElement(ev.selector, ev.x, ev.y, "click");
+        flashElement(ev.selector, ev.x, ev.y, "dblclick");
         if (ev.selector) {
           try {
             const el = await pickByLabelOrFirst(state.activePage, ev.selector, ev.label);
