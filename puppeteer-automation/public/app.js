@@ -548,9 +548,19 @@
     let crossEnv  = false;
 
     // 2차: origin이 다른 경우 pathname만으로 폴백 (다른 환경 레코딩)
+    // pathname이 일치하는 레코딩이 여러 origin에 걸쳐 있으면
+    // 가장 최근(id 최대) 레코딩의 origin만 선택해서 표시
     if (visible.length === 0 && curPath) {
-      visible  = recordings.filter(r => pathKey(r.url) === curPath);
-      crossEnv = visible.length > 0;
+      const pathMatches = recordings.filter(r => pathKey(r.url) === curPath);
+      if (pathMatches.length > 0) {
+        const latestOrigin = (() => {
+          try { return new URL(pathMatches[pathMatches.length - 1].url).origin; } catch { return null; }
+        })();
+        visible  = latestOrigin
+          ? pathMatches.filter(r => { try { return new URL(r.url).origin === latestOrigin; } catch { return false; } })
+          : pathMatches;
+        crossEnv = true;
+      }
     }
 
     recCount.textContent = crossEnv
