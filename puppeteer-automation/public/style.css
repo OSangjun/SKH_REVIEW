@@ -348,17 +348,22 @@ html, body {
   border-color: var(--border-strong);
 }
 
-/* Address bar 'Go' — flush right of input */
+/* Address bar 'Go' — flush right of input. Icon-only square button. */
 .btn-go {
   background: var(--accent);
   color: #fff;
   border: none;
-  border-left: 1px solid var(--accent);
   border-radius: 0;
-  padding: 0 16px;
+  padding: 0 14px;
   height: 100%;
+  width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
+.btn-go .icon { width: 16px; height: 16px; }
 .btn-go:hover:not(:disabled) { background: var(--accent-hover); }
+.btn-go:active:not(:disabled) { background: var(--accent); transform: none; }
 
 /* Record — toggle button: idle (red dot) → active (red bg, pulse) */
 .btn-record {
@@ -1461,8 +1466,9 @@ body.log-collapsed #log-body { display: none; }
 .ov-suite-result.hidden { display: none; }
 
 /* ── HTTP 응답 모달 ───────────────────────────────────────────────────────── */
+/* ── HTTP response viewer/editor — tree (collapsed → expanded) ─────────────── */
 .resp-modal-box {
-  width: min(760px, 95vw);
+  width: min(820px, 95vw);
   max-height: 85vh;
   display: flex;
   flex-direction: column;
@@ -1476,95 +1482,205 @@ body.log-collapsed #log-body { display: none; }
 .resp-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 12px;
+  padding: var(--gap-2) var(--gap-3);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--gap-1);
 }
+
+/* A row = collapsed header + (optional) detail panel */
 .resp-row {
-  background: var(--bg3);
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  transition: border-color .15s, background .15s;
 }
+.resp-row:hover { border-color: var(--border-strong); }
+.resp-row.expanded { border-color: var(--accent); background: var(--bg); }
+
+/* Collapsed header — full-width clickable button. Shows method + status + URL. */
 .resp-row-head {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-.resp-status-wrap {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.resp-label {
-  font-size: 10px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: .04em;
-  flex-shrink: 0;
-}
-.resp-status-input {
-  width: 56px;
+  gap: var(--gap-2);
+  padding: 8px 10px;
   background: var(--bg2);
-  border: 1px solid var(--border);
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
   color: var(--text);
-  font-size: 12px;
-  padding: 2px 5px;
-  border-radius: 3px;
-  text-align: center;
+  transition: background .12s;
 }
-.resp-ct {
-  font-size: 10px;
+.resp-row-head:hover { background: var(--bg3); }
+.resp-row.expanded .resp-row-head { background: var(--bg3); border-bottom: 1px solid var(--border); }
+
+.resp-twist {
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text-dim);
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 3px;
   flex-shrink: 0;
 }
+.resp-twist .icon { width: 12px; height: 12px; }
+
+/* Method badge — colored by HTTP verb */
+.resp-method {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+.resp-method.method-get    { color: #5fd494; background: var(--replay-soft); border-color: rgba(52,194,112,.3); }
+.resp-method.method-post   { color: #f5b13c; background: var(--warn-soft);   border-color: rgba(245,177,60,.3); }
+.resp-method.method-put    { color: #4f8eff; background: var(--accent-soft); border-color: rgba(79,142,255,.3); }
+.resp-method.method-patch  { color: #b07cf6; background: rgba(176,124,246,.12); border-color: rgba(176,124,246,.3); }
+.resp-method.method-delete { color: #f06363; background: var(--rec-soft);    border-color: rgba(240,99,99,.3); }
+.resp-method.method-head, .resp-method.method-options {
+  color: var(--text-dim); background: var(--bg); border-color: var(--border);
+}
+
+/* Status pill — colored by HTTP status range */
+.resp-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.resp-status-pill.ok      { color: #5fd494; background: var(--replay-soft); }
+.resp-status-pill.redir   { color: #4f8eff; background: var(--accent-soft); }
+.resp-status-pill.warn    { color: #f5b13c; background: var(--warn-soft); }
+.resp-status-pill.err     { color: #f06363; background: var(--rec-soft); }
+.resp-status-pill.unknown { color: var(--text-dim); background: var(--bg); }
+
+/* URL text (monospace, truncated) */
+.resp-url-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-mid);
+}
+.resp-row.expanded .resp-url-text { color: var(--text); }
+
+.resp-row-del-wrap { flex-shrink: 0; }
 .resp-row-del {
-  margin-left: auto;
   background: none;
   border: none;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 12px;
-  padding: 2px 4px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-sm);
+  transition: color .15s, background .15s;
 }
-.resp-row-del:hover { color: var(--rec-color); }
-.resp-url-wrap { display: flex; flex-direction: column; gap: 2px; }
-.resp-url-input {
+.resp-row-del .icon { width: 14px; height: 14px; }
+.resp-row-del:hover { color: var(--rec-color); background: var(--rec-soft); }
+
+/* Expanded detail panel */
+.resp-row-detail {
+  padding: var(--gap-3) var(--gap-3) var(--gap-3) 38px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-3);
+  background: var(--bg);
+  animation: respSlideIn .15s ease-out;
+}
+.resp-row-detail.hidden { display: none; }
+@keyframes respSlideIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.resp-detail-grid {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  align-items: center;
+  gap: 6px var(--gap-3);
+}
+.resp-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: .02em;
+  font-weight: 600;
+}
+.resp-input {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.resp-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.resp-input[readonly] {
+  color: var(--text-mid);
+  background: var(--bg);
+  cursor: default;
+}
+
+.resp-body-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.resp-body-input,
+.resp-reqbody-input {
   width: 100%;
   background: var(--bg2);
   border: 1px solid var(--border);
-  color: var(--accent);
-  font-size: 11px;
-  font-family: monospace;
-  padding: 3px 6px;
-  border-radius: 3px;
-}
-.resp-url-input:focus { outline: 1px solid var(--accent); }
-.resp-body-wrap { display: flex; flex-direction: column; gap: 3px; }
-.resp-body-input {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
   color: var(--text);
-  font-size: 11px;
-  font-family: monospace;
-  padding: 5px 7px;
-  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
   resize: vertical;
-  min-height: 60px;
+  min-height: 80px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
 }
-.resp-body-input:focus { outline: 1px solid var(--accent); }
+.resp-body-input:focus,
+.resp-reqbody-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.resp-reqbody-input { background: var(--bg); color: var(--text-mid); cursor: default; }
+
 .resp-count-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-dim);
   align-self: center;
+  font-variant-numeric: tabular-nums;
 }

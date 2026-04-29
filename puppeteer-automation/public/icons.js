@@ -22,6 +22,7 @@
       '<circle cx="12" cy="12" r="10"/>' +
       '<path d="M2 12h20"/>' +
       '<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>'),
+    arrowRight: () => ico('<path d="M5 12h14"/><path d="m13 5 7 7-7 7"/>'),
     moreHorizontal: () => ico(
       '<circle cx="5" cy="12" r="1.2"/>' +
       '<circle cx="12" cy="12" r="1.2"/>' +

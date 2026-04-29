@@ -1100,6 +1100,21 @@
       });
   }
 
+  // Tracks which response rows are currently expanded so the user's choice
+  // persists across re-renders (delete, add, edit).
+  const expandedRespIdx = new Set();
+
+  // Map a status code to a CSS class for the colored pill in the header.
+  function statusClassOf(s) {
+    if (s == null || s === '-' ) return 'unknown';
+    const n = +s;
+    if (n >= 200 && n < 300) return 'ok';
+    if (n >= 300 && n < 400) return 'redir';
+    if (n >= 400 && n < 500) return 'warn';
+    if (n >= 500)            return 'err';
+    return 'unknown';
+  }
+
   function renderRespList() {
     respCountLabel.textContent = `${respItems.length}개 항목`;
     if (respItems.length === 0) {
@@ -1112,6 +1127,14 @@
       row.className = 'resp-row';
       row.dataset.idx = idx;
 
+      const isExpanded = expandedRespIdx.has(idx);
+      if (isExpanded) row.classList.add('expanded');
+
+      const method = (item.method || 'GET').toUpperCase();
+      const status = item.status;
+      const statusLabel = status == null ? '—' : String(status);
+      const sCls = statusClassOf(status);
+
       const bodyText = item.body ?? '';
       let bodyDisplay = '';
       try {
@@ -1120,22 +1143,47 @@
         bodyDisplay = bodyText;
       }
 
+      const reqBodyText = item.reqBody ?? '';
+      let reqBodyDisplay = '';
+      try {
+        reqBodyDisplay = JSON.stringify(JSON.parse(reqBodyText), null, 2);
+      } catch {
+        reqBodyDisplay = reqBodyText;
+      }
+      const hasReqBody = reqBodyText && reqBodyText.trim() !== '';
+
       row.innerHTML = `
-        <div class="resp-row-head">
-          <span class="resp-status-wrap">
-            <label class="resp-label">상태</label>
-            <input class="resp-status-input" type="number" min="100" max="599"
-              value="${esc(String(item.status ?? 200))}" data-idx="${idx}" />
+        <button type="button" class="resp-row-head" data-idx="${idx}" aria-expanded="${isExpanded ? 'true' : 'false'}">
+          <span class="resp-twist">${ICON(isExpanded ? 'chevronDown' : 'chevronRight')}</span>
+          <span class="resp-method method-${method.toLowerCase()}">${esc(method)}</span>
+          <span class="resp-status-pill ${sCls}">${esc(statusLabel)}</span>
+          <span class="resp-url-text" title="${esc(item.url || '')}">${esc(item.url || '(URL 없음)')}</span>
+          <span class="resp-row-del-wrap">
+            <button class="resp-row-del" data-idx="${idx}" title="항목 삭제" aria-label="항목 삭제">${ICON('trash')}</button>
           </span>
-          <span class="resp-ct">${esc((item.contentType || '').split(';')[0].trim())}</span>
-          <button class="resp-row-del" data-idx="${idx}" title="항목 삭제" aria-label="항목 삭제">${ICON('x')}</button>
-        </div>
-        <div class="resp-url-wrap" title="${esc(item.url || '')}">
-          <input class="resp-url-input" type="text" value="${esc(item.url || '')}" data-idx="${idx}" placeholder="URL" />
-        </div>
-        <div class="resp-body-wrap">
-          <label class="resp-label">응답 바디</label>
-          <textarea class="resp-body-input" rows="5" data-idx="${idx}" placeholder="(없음)">${esc(bodyDisplay)}</textarea>
+        </button>
+        <div class="resp-row-detail ${isExpanded ? '' : 'hidden'}">
+          <div class="resp-detail-grid">
+            <label class="resp-label">URL</label>
+            <input class="resp-url-input resp-input" type="text" value="${esc(item.url || '')}" data-idx="${idx}" placeholder="URL" />
+
+            <label class="resp-label">상태 코드</label>
+            <input class="resp-status-input resp-input" type="number" min="100" max="599"
+              value="${esc(String(item.status ?? 200))}" data-idx="${idx}" />
+
+            <label class="resp-label">Content-Type</label>
+            <input class="resp-ct-input resp-input" type="text"
+              value="${esc(item.contentType || '')}" data-idx="${idx}" placeholder="application/json" readonly />
+          </div>
+          ${hasReqBody ? `
+          <div class="resp-body-wrap">
+            <label class="resp-label">요청 바디</label>
+            <textarea class="resp-reqbody-input" rows="4" data-idx="${idx}" readonly>${esc(reqBodyDisplay)}</textarea>
+          </div>` : ''}
+          <div class="resp-body-wrap">
+            <label class="resp-label">응답 바디</label>
+            <textarea class="resp-body-input" rows="8" data-idx="${idx}" placeholder="(없음)">${esc(bodyDisplay)}</textarea>
+          </div>
         </div>`;
       respList.appendChild(row);
     });
@@ -1145,17 +1193,50 @@
     const statusIn = e.target.closest('.resp-status-input');
     const urlIn    = e.target.closest('.resp-url-input');
     const bodyIn   = e.target.closest('.resp-body-input');
-    if (statusIn) { respItems[+statusIn.dataset.idx].status = +statusIn.value; return; }
-    if (urlIn)    { respItems[+urlIn.dataset.idx].url    = urlIn.value; return; }
+    if (statusIn) {
+      const idx = +statusIn.dataset.idx;
+      respItems[idx].status = +statusIn.value;
+      // Update the status pill in the collapsed header live, no full re-render
+      const pill = respList.querySelector(`.resp-row[data-idx="${idx}"] .resp-status-pill`);
+      if (pill) {
+        pill.textContent = statusIn.value || '—';
+        pill.className = `resp-status-pill ${statusClassOf(statusIn.value)}`;
+      }
+      return;
+    }
+    if (urlIn) {
+      const idx = +urlIn.dataset.idx;
+      respItems[idx].url = urlIn.value;
+      const span = respList.querySelector(`.resp-row[data-idx="${idx}"] .resp-url-text`);
+      if (span) {
+        span.textContent = urlIn.value || '(URL 없음)';
+        span.title = urlIn.value;
+      }
+      return;
+    }
     if (bodyIn)   { respItems[+bodyIn.dataset.idx].body  = bodyIn.value; return; }
   });
 
   respList.addEventListener('click', e => {
+    // Delete button (don't bubble to row-head expand)
     const del = e.target.closest('.resp-row-del');
-    if (!del) return;
-    const idx = +del.dataset.idx;
-    respItems.splice(idx, 1);
-    renderRespList();
+    if (del) {
+      e.stopPropagation();
+      const idx = +del.dataset.idx;
+      respItems.splice(idx, 1);
+      // Reset expansion (indices shifted) — keep it simple by clearing
+      expandedRespIdx.clear();
+      renderRespList();
+      return;
+    }
+    // Header click toggles expansion
+    const head = e.target.closest('.resp-row-head');
+    if (head) {
+      const idx = +head.dataset.idx;
+      if (expandedRespIdx.has(idx)) expandedRespIdx.delete(idx);
+      else expandedRespIdx.add(idx);
+      renderRespList();
+    }
   });
 
   respAddBtn.addEventListener('click', () => {

@@ -13,9 +13,9 @@
     <div id="address-bar">
       <button id="url-tree-btn" class="bar-icon-btn" title="등록된 테스트 케이스 URL 보기" aria-label="등록된 URL 트리 보기" data-icon="moreHorizontal"></button>
       <span class="bar-icon" data-icon="globe"></span>
-      <input id="url-input" type="text" list="url-history" placeholder="https://example.com 입력 후 Enter 또는 이동 클릭" spellcheck="false" />
+      <input id="url-input" type="text" list="url-history" placeholder="https://example.com 입력 후 Enter 또는 → 클릭" spellcheck="false" />
       <datalist id="url-history"></datalist>
-      <button id="go-btn" class="btn btn-go">이동</button>
+      <button id="go-btn" class="btn btn-go" title="이동" aria-label="이동" data-icon="arrowRight"></button>
     </div>
     <!-- URL tree popup: origins from recorded test cases, expandable to paths -->
     <div id="url-tree-popup" class="url-tree-popup hidden" role="dialog" aria-label="등록된 URL 트리">
