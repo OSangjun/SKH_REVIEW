@@ -223,7 +223,7 @@ function buildCaptureScript() {
         return 'a[href=' + JSON.stringify(href) + ']';
 
       // 8. Unique class combination (skip volatile state classes)
-      var VOLATILE = /^(active|selected|focus|focused|hover|disabled|show|hide|visible|open|closed|is-active|is-open|is-selected|is-disabled|loading|checked)$/;
+      var VOLATILE = /^(active|selected|focus|focused|hover|disabled|show|hide|visible|open|closed|is-active|is-open|is-selected|is-disabled|loading|checked|__rfRec__)$/;
       if (el.className && typeof el.className === 'string') {
         var cls2 = el.className.trim().split(/\\s+/).filter(function(c) {
           return c && !VOLATILE.test(c);
@@ -346,8 +346,9 @@ function buildCaptureScript() {
         var assocSel = findAssociatedSelect(rawTarget);
         if (assocSel) base.elSelectSelector = assocSel;
       }
+      var clickEvt = withTarget(base, e.target); // capture selector before flash class is added
       flashTarget(rawTarget);
-      cap('click', withTarget(base, e.target));
+      cap('click', clickEvt);
     }, true);
 
     document.addEventListener('dblclick', e => {
