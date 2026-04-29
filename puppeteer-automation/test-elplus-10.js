@@ -213,7 +213,7 @@ function makeRespListener(responses, pending) {
     const p = response.buffer()
       .then(buf => responses.push({
         url, status: st, contentType: ct,
-        body: buf.length <= 51200 ? buf.toString("utf8") : null,
+        body: buf.toString("utf8"),
       }))
       .catch(() => responses.push({ url, status: st, contentType: ct, body: null }))
       .finally(() => pending.delete(p));

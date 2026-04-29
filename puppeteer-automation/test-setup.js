@@ -165,7 +165,7 @@ async function capture(page, actions, baseT) {
     if (!wantBody) { responses.push({ url, status: st, contentType: ct, body: null, t }); return; }
     const p = response.buffer().then(buf => {
       responses.push({ url, status: st, contentType: ct,
-                       body: buf.length <= 51200 ? buf.toString("utf8") : null, t });
+                       body: buf.toString("utf8"), t });
     }).catch(() => responses.push({ url, status: st, contentType: ct, body: null, t }))
       .finally(() => pending.delete(p));
     pending.add(p);

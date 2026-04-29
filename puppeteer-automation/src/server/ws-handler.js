@@ -49,7 +49,7 @@ async function handleClientMessage(msg) {
           const p = response
             .buffer()
             .then((buf) => {
-              const body = buf.length <= 51200 ? buf.toString("utf8") : null;
+              const body = buf.toString("utf8");
               initCap.responses.push({ url, status, contentType: ct, body, t });
             })
             .catch(() => initCap.responses.push({ url, status, contentType: ct, body: null, t }))

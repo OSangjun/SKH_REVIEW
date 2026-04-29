@@ -290,7 +290,7 @@ async function runReplay(
     const p = response
       .buffer()
       .then((buf) => {
-        const body = buf.length <= 51200 ? buf.toString("utf8") : null;
+        const body = buf.toString("utf8");
         replayResponses.push({ url, status, contentType: ct, body });
       })
       .catch(() =>
