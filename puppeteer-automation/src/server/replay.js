@@ -451,13 +451,14 @@ async function runReplay(
         if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
         const key = mkKey(request.url());
         const rec = mockMap.get(key);
+        // Hybrid mock: pass through to the real server when no recording is
+        // available. This avoids cascading axios "Network Error" when the
+        // page makes calls (SDK init, analytics, lazy-loaded data) that
+        // weren't part of the recording. Recorded responses still take
+        // precedence and stay deterministic.
         if (!rec || rec.body === null) {
-          log("warn", `[Mock] 미매칭 차단: ${request.url()}`);
-          return request.respond({
-            status: 503,
-            headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
-            body: '{"error":"mock: endpoint not recorded"}',
-          }).catch(() => {});
+          log("info", `[Mock] 미매칭 → 실서버 통과: ${request.url()}`);
+          return request.continue().catch(() => {});
         }
         log("info", `[Mock] ${request.method()} ${request.url()}`);
         await request.respond({

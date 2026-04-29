@@ -107,11 +107,13 @@
       wsReady  = true;
       wsRetry  = 0;
       setStatus('연결됨. URL을 입력하고 이동하세요.');
+      document.getElementById('statusbar')?.classList.add('connected');
     });
 
     ws.addEventListener('close', () => {
       wsReady = false;
       recordBtn.disabled = true;
+      document.getElementById('statusbar')?.classList.remove('connected', 'recording', 'replaying');
       if (wsRetry >= WS_MAX_RETRIES) {
         setStatus('서버에 연결할 수 없습니다. 페이지를 새로고침하세요.');
         return;
@@ -159,6 +161,12 @@
         frameUrlLabel.textContent = msg.url || 'about:blank';
         urlInput.value = msg.url && msg.url !== 'about:blank' ? msg.url : urlInput.value;
         currentPageUrl = msg.url || '';
+        // Toggle the empty-canvas hint based on whether a real page is loaded
+        const wrap = document.querySelector('.canvas-wrap');
+        if (wrap) {
+          const isBlank = !msg.url || msg.url === 'about:blank';
+          wrap.dataset.blank = isBlank ? '1' : '';
+        }
         renderList();
         break;
 
@@ -169,6 +177,7 @@
         recBadge.classList.remove('hidden');
         replayBtn.disabled = true;
         setStatus('기록 중… 브라우저에서 자유롭게 상호작용하세요.');
+        document.getElementById('statusbar')?.classList.add('recording');
         break;
 
       case 'recording-event':
@@ -179,6 +188,7 @@
         isRecording = false;
         recordBtn.classList.remove('active');
         recordBtn.innerHTML = '<span class="dot"></span> 기록';
+        document.getElementById('statusbar')?.classList.remove('recording');
         recBadge.classList.add('hidden');
         setStatus(`저장 완료 — ${msg.recording.name} (${msg.recording.eventCount}개 이벤트)`);
         break;
@@ -187,6 +197,7 @@
         isRecording = false;
         recordBtn.classList.remove('active');
         recordBtn.innerHTML = '<span class="dot"></span> 기록';
+        document.getElementById('statusbar')?.classList.remove('recording');
         recBadge.classList.add('hidden');
         setStatus('기록된 이벤트가 없습니다.');
         break;
@@ -215,6 +226,7 @@
           recordBtn.disabled = true;
           showOverlay(replayingName, 0, 0);
         }
+        document.getElementById('statusbar')?.classList.add('replaying');
         break;
 
       case 'replay-progress':
@@ -229,6 +241,7 @@
           hideOverlay();
           setStatus(`재생 완료 — ${replayingName}`);
         }
+        document.getElementById('statusbar')?.classList.remove('replaying');
         break;
 
       case 'history-all':
