@@ -19,8 +19,13 @@ const { send, log } = require("./comms");
 // Events that typically trigger network requests and warrant idle-waiting
 const NETWORK_EVENTS = new Set(["navigate", "click", "dblclick"]);
 
-// Passive gesture events — no UI state change, no settle delay needed
-const NO_SETTLE_EVTS = new Set(["wheel", "scroll", "hover", "mousemove", "mouseup", "mousedown"]);
+// Events that don't need UI settle delay: passive gestures + keyboard input
+// (keydown/keyup/input fire many times per field; Enter is handled separately
+//  via waitNetworkIdle so it still gets the network settle it needs)
+const NO_SETTLE_EVTS = new Set([
+  "wheel", "scroll", "hover", "mousemove", "mouseup", "mousedown",
+  "keydown", "keyup", "input", "contenteditable",
+]);
 // Milliseconds to pause after each user-action event so that Vue/React
 // reactivity, CSS transitions, and component state updates can complete
 // before the next action is dispatched.
