@@ -81,7 +81,7 @@ html, body {
   transition: opacity .15s, background .15s;
   white-space: nowrap;
 }
-.btn:disabled { opacity: .4; cursor: default; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
 
 .btn-go {
   background: var(--accent);
@@ -430,7 +430,7 @@ body.log-collapsed #log-body { display: none; }
   font-weight: 600;
   color: var(--text);
   margin-bottom: 3px;
-  word-break: break-all;
+  overflow-wrap: break-word;
 }
 .rec-desc {
   font-size: 11px;
@@ -656,7 +656,7 @@ body.log-collapsed #log-body { display: none; }
   align-items: center;
   gap: 5px;
   font-size: .78rem;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
@@ -676,7 +676,7 @@ body.log-collapsed #log-body { display: none; }
   align-items: center;
   gap: 5px;
   font-size: .78rem;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   user-select: none;
   white-space: nowrap;

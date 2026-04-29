@@ -122,7 +122,10 @@
       setTimeout(connect, delay);
     });
 
-    ws.addEventListener('error', () => {});
+    ws.addEventListener('error', () => {
+      setStatus('WebSocket 연결 오류가 발생했습니다. 재연결 중…');
+      appendLog('warn', null, 'WebSocket 오류 발생');
+    });
 
     ws.addEventListener('message', e => {
       let msg;
@@ -310,8 +313,15 @@
   }
 
   // ── Coordinate scaling ────────────────────────────────────────────────────────
+  let _cachedRect = null;
+  window.addEventListener('resize', () => { _cachedRect = null; });
+  function getCanvasRect() {
+    if (!_cachedRect) _cachedRect = canvas.getBoundingClientRect();
+    return _cachedRect;
+  }
+
   function canvasCoords(e) {
-    const rect  = canvas.getBoundingClientRect();
+    const rect   = getCanvasRect();
     const scaleX = canvas.width  / rect.width;
     const scaleY = canvas.height / rect.height;
     return {
@@ -327,9 +337,14 @@
   // ── Canvas input forwarding ───────────────────────────────────────────────────
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
+  let _mousemoveRafId = null;
   canvas.addEventListener('mousemove', e => {
-    const { x, y } = canvasCoords(e);
-    send({ type: 'mousemove', x, y });
+    if (_mousemoveRafId !== null) return;
+    _mousemoveRafId = requestAnimationFrame(() => {
+      _mousemoveRafId = null;
+      const { x, y } = canvasCoords(e);
+      send({ type: 'mousemove', x, y });
+    });
   });
 
   canvas.addEventListener('mousedown', e => {
@@ -358,12 +373,22 @@
     send({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY });
   }, { passive: false });
 
+  const PASSTHROUGH_KEYS = new Set(['F12', 'Escape']);
+  const PASSTHROUGH_CTRL = new Set(['c', 'C', 'a', 'A', 'v', 'V', 'z', 'Z', 'x', 'X']);
+  function shouldPassthrough(e) {
+    if (PASSTHROUGH_KEYS.has(e.key)) return true;
+    if ((e.ctrlKey || e.metaKey) && PASSTHROUGH_CTRL.has(e.key)) return true;
+    return false;
+  }
+
   canvas.addEventListener('keydown', e => {
+    if (shouldPassthrough(e)) return;
     e.preventDefault();
     send({ type: 'keydown', key: e.key, code: e.code });
   });
 
   canvas.addEventListener('keyup', e => {
+    if (shouldPassthrough(e)) return;
     e.preventDefault();
     send({ type: 'keyup', key: e.key, code: e.code });
   });
@@ -383,7 +408,10 @@
   urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(urlInput.value); });
 
   // ── Recording controls ────────────────────────────────────────────────────────
+  let _recordBtnTimeout = null;
   recordBtn.addEventListener('click', () => {
+    if (_recordBtnTimeout !== null) return;
+    _recordBtnTimeout = setTimeout(() => { _recordBtnTimeout = null; }, 300);
     if (isRecording) {
       send({ type: 'stop-recording' });
     } else {
@@ -414,7 +442,8 @@
   }
 
   function updateOverlay(done, total) {
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    const raw = total > 0 ? Math.round((done / total) * 100) : 0;
+    const pct = Math.min(100, Math.max(0, raw));
     ovBar.style.width       = `${pct}%`;
     ovProgress.textContent  = total > 0
       ? `${done} / ${total} 이벤트 (${pct}%)`
@@ -694,7 +723,7 @@
     if (xscript) { e.stopPropagation(); exportScript(+xscript.dataset.id);  return; }
     if (item && !e.target.closest('.rec-edit-form')) {
       selectedId = +item.dataset.id;
-      replayBtn.disabled = false;
+      replayBtn.disabled = isReplaying || suiteMode;
       renderList();
     }
   });
@@ -733,9 +762,17 @@
 
     logLines.appendChild(line);
 
-    // Trim old lines
-    while (logLines.childElementCount > MAX_LOG_LINES)
-      logLines.removeChild(logLines.firstChild);
+    // Trim old lines — insert a sentinel when trimming begins
+    if (logLines.childElementCount >= MAX_LOG_LINES) {
+      while (logLines.childElementCount >= MAX_LOG_LINES)
+        logLines.removeChild(logLines.firstChild);
+      const sentinel = document.createElement('div');
+      sentinel.className = 'log-line warn log-trim-notice';
+      sentinel.innerHTML =
+        '<span class="log-ts">—</span>' +
+        '<span class="log-msg">이전 로그 500줄 잘림</span>';
+      logLines.insertBefore(sentinel, logLines.firstChild);
+    }
 
     // Auto-scroll if not manually scrolled up
     const body = logLines.parentElement;
