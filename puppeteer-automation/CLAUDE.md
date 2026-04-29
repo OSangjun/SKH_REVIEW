@@ -200,7 +200,10 @@ node run-tests.js [options]
 --ids <n,n,n>          복수 ID 실행
 --fast                 CI 모드 (think-time 제거, domcontentloaded, idleTime 200ms)
 --no-mock-replay       실서버로 실제 HTTP 요청 전송 (기본은 목 모드)
---base-url <url>       환경 전환 (staging, QA 등)
+--base-url <url>       페이지 내비게이션 URL의 origin 교체 — 다른 환경에서 실행 시 필수
+                       (API 응답은 path-only로 저장/매칭되므로 mock은 환경 무관,
+                        그러나 브라우저 페이지 이동에는 반드시 origin이 필요)
+                       예: --base-url https://staging.example.com
 --retry <n>            실패 시 재시도 횟수
 --parallel <n>         동시 실행 컨텍스트 수
 --no-http-compare      HTTP 바디 비교 생략, 2xx 여부만 확인

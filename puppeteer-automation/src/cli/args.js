@@ -135,15 +135,24 @@ ${C.bold}Cookie options (override recording cookies, higher priority):${C.reset}
                            Repeat for multiple cookies.
   --cookie-file <path>     Load cookies from a JSON file (array of cookie objects).
 
+${C.bold}Environment switching:${C.reset}
+  --base-url <url>         Replace the origin of all page-navigation URLs.
+                           REQUIRED when running recordings against a different
+                           environment (local → dev → staging → production).
+                           API response bodies are stored and matched by path
+                           only, so mock-replay works across environments once
+                           this flag is set for navigation.
+                           Example: --base-url https://staging.example.com
+                           Also settable via BASE_URL env variable.
+
 ${C.bold}Output:${C.reset}
-  --base-url <url>         Replace origin of all URLs (env switching)
   --output <file>          Write JSON report to file
   --junit <file>           Write JUnit XML report to file (for CI systems)
   --verbose, -v            Show event-level detail during replay
 
 ${C.bold}Environment variables:${C.reset}
   CHROME_PATH              Chrome/Chromium executable path
-  BASE_URL                 Same as --base-url
+  BASE_URL                 Same as --base-url (page navigation origin)
 
 ${C.bold}Exit codes:${C.reset}
   0   All tests passed (or no responses recorded to compare)
