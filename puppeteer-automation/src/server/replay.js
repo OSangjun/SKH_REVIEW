@@ -85,15 +85,33 @@ async function dispatchReplayEvent(ev) {
         flashElement(ev.selector, ev.x, ev.y, "click");
         if (ev.elSelectSelector) {
           try {
-            const selEl = await pickByLabelOrFirst(state.activePage, ev.elSelectSelector);
-            if (selEl) {
-              const isOpen = await selEl.evaluate(
-                (e) => e.classList.contains("is-focus") || e.classList.contains("is-open")
-              ).catch(() => false);
-              if (!isOpen) {
-                await selEl.click();
-                await new Promise((r) => setTimeout(r, 300));
+            // Detect open state via visible dropdown items — more reliable than
+            // is-focus/is-open classes which vary across El Plus versions.
+            const isOpen = await state.activePage.evaluate(() => {
+              var items = document.querySelectorAll(".el-select-dropdown__item");
+              for (var i = 0; i < items.length; i++) {
+                var r = items[i].getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) return true;
               }
+              return false;
+            }).catch(() => false);
+            if (!isOpen) {
+              await state.activePage.evaluate((sel) => {
+                var el = document.querySelector(sel);
+                if (!el) return;
+                var wrapper = el.querySelector(".el-select__wrapper") || el;
+                wrapper.click();
+              }, ev.elSelectSelector);
+              // Poll until at least one dropdown item is visible — avoids the
+              // fixed-delay race where 300ms was shorter than the open animation.
+              await state.activePage.waitForFunction(() => {
+                var items = document.querySelectorAll(".el-select-dropdown__item");
+                for (var i = 0; i < items.length; i++) {
+                  var r = items[i].getBoundingClientRect();
+                  if (r.width > 0 && r.height > 0) return true;
+                }
+                return false;
+              }, { timeout: 3000 }).catch(() => {});
             }
           } catch {}
         }
@@ -101,6 +119,11 @@ async function dispatchReplayEvent(ev) {
           try {
             const el = await pickByLabelOrFirst(state.activePage, ev.selector, ev.label);
             if (el) {
+              // Scroll the option into view within the dropdown list before clicking.
+              // Handles the case where the target option is below the dropdown's
+              // visible fold and requires scrolling to become interactable.
+              if (ev.elSelectSelector)
+                await el.evaluate((e) => e.scrollIntoView({ block: "nearest" })).catch(() => {});
               await el.click();
               break;
             }
