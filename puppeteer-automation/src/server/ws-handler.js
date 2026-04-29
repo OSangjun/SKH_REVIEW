@@ -7,6 +7,8 @@ const {
   dbDeleteRecording, dbDeleteHistoryByRecording,
 } = require("./db");
 const { runReplay, mapResponsesToEvents } = require("./replay");
+const { isApiResponse } = require("../shared/api-filter");
+const { isTrackerUrl } = require("../shared/blocklist");
 const state = require("./state");
 const { send, log } = require("./comms");
 
@@ -26,10 +28,71 @@ async function handleClientMessage(msg) {
       state.firstNavigateDone = false;
       if (state.sessionCookies.length > 0)
         await state.activePage.setCookie(...state.sessionCookies);
+
+      // Auto-capture initialization responses (skip if recording/replay in progress)
+      let initCap = null;
+      if (!state.isRecording) {
+        initCap = { responses: [], pending: new Set(), t0: Date.now() };
+        initCap.handler = (response) => {
+          const url = response.url();
+          if (url.startsWith("data:") || url.startsWith("blob:")) return;
+          if (!isApiResponse(response)) return;
+          if (isTrackerUrl(url)) return;
+          const ct = (response.headers()["content-type"] || "").toLowerCase();
+          const wantBody = /json|text\/plain|xml/.test(ct);
+          const status = response.status();
+          const t = Date.now() - initCap.t0;
+          if (!wantBody) {
+            initCap.responses.push({ url, status, contentType: ct, body: null, t });
+            return;
+          }
+          const p = response
+            .buffer()
+            .then((buf) => {
+              const body = buf.length <= 51200 ? buf.toString("utf8") : null;
+              initCap.responses.push({ url, status, contentType: ct, body, t });
+            })
+            .catch(() => initCap.responses.push({ url, status, contentType: ct, body: null, t }))
+            .finally(() => initCap.pending.delete(p));
+          initCap.pending.add(p);
+        };
+        state.activePage.on("response", initCap.handler);
+      }
+
       await state.activePage.goto(msg.url, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
+
+      if (initCap) {
+        // Wait for async API calls to settle after DOMContentLoaded
+        try {
+          await state.activePage.waitForNetworkIdle({ idleTime: 500, timeout: 10000 });
+        } catch {}
+        state.activePage.off("response", initCap.handler);
+        if (initCap.pending.size > 0)
+          await Promise.race([
+            Promise.allSettled([...initCap.pending]),
+            sleep(2000),
+          ]);
+        if (initCap.responses.length > 0) {
+          const navEv = { type: "navigate", url: msg.url, t: 0 };
+          const events = mapResponsesToEvents([navEv], initCap.responses);
+          const newId = dbSaveRecording(
+            "초기화",
+            msg.url,
+            1,
+            new Date().toISOString(),
+            events,
+            initCap.responses,
+            [...state.sessionCookies],
+            [],
+          );
+          send({ type: "recordings", list: dbAllMeta() });
+          log("info", `[초기화] 자동 저장 — id=${newId}, 응답 ${initCap.responses.length}건`);
+        }
+      }
+
       break;
     }
 
