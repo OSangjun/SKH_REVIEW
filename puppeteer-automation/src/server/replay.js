@@ -37,9 +37,9 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function waitNetworkIdle(timeout = 60000) {
+async function waitNetworkIdle(timeout = 60000, idleTime = 500) {
   try {
-    await state.activePage.waitForNetworkIdle({ idleTime: 200, timeout });
+    await state.activePage.waitForNetworkIdle({ idleTime, timeout });
   } catch {}
 }
 
