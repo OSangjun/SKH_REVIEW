@@ -5,6 +5,7 @@ const {
   dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts,
   dbSaveRecording, dbUpdateMeta, dbUpdateName,
   dbDeleteRecording, dbDeleteHistoryByRecording,
+  dbFindInitByUrl,
 } = require("./db");
 const { runReplay, mapResponsesToEvents } = require("./replay");
 const { isApiResponse } = require("../shared/api-filter");
@@ -76,20 +77,27 @@ async function handleClientMessage(msg) {
             sleep(2000),
           ]);
         if (initCap.responses.length > 0) {
-          const navEv = { type: "navigate", url: msg.url, t: 0 };
-          const events = mapResponsesToEvents([navEv], initCap.responses);
-          const newId = dbSaveRecording(
-            "초기화",
-            msg.url,
-            1,
-            new Date().toISOString(),
-            events,
-            initCap.responses,
-            [...state.sessionCookies],
-            [],
-          );
-          send({ type: "recordings", list: dbAllMeta() });
-          log("info", `[초기화] 자동 저장 — id=${newId}, 응답 ${initCap.responses.length}건`);
+          // Skip if an 초기화 recording already exists for this URL.
+          // Re-record only when the user has deleted it (dbFindInitByUrl returns null).
+          const existingInitId = dbFindInitByUrl(msg.url);
+          if (existingInitId) {
+            log("info", `[초기화] 이미 존재함 (id=${existingInitId}), 재녹화 생략`);
+          } else {
+            const navEv = { type: "navigate", url: msg.url, t: 0 };
+            const events = mapResponsesToEvents([navEv], initCap.responses);
+            const newId = dbSaveRecording(
+              "초기화",
+              msg.url,
+              1,
+              new Date().toISOString(),
+              events,
+              initCap.responses,
+              [...state.sessionCookies],
+              [],
+            );
+            send({ type: "recordings", list: dbAllMeta() });
+            log("info", `[초기화] 자동 저장 — id=${newId}, 응답 ${initCap.responses.length}건`);
+          }
         }
       }
 
