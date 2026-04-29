@@ -5,6 +5,7 @@ const C = require("./colors");
 const { applyBaseUrl, canonicalUrl, pageKey } = require("../shared/url");
 const { isApiResponse } = require("../shared/api-filter");
 const { isBlockedUrl, isTrackerUrl } = require("../shared/blocklist");
+const { openDb } = require("../shared/db");
 const {
   buildStatusOnlyResults, compareResponses, compareToasts, compareTriggerMappings, isNetworkTrigger,
 } = require("../shared/compare");
@@ -118,9 +119,21 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
   let mockRequestHandler = null;
   async function setupMockRoutes() {
     mockMap = new Map();
-    // Last-write-wins: later responses for the same URL override earlier ones.
-    // Matching is by URL + query params (cache-busters stripped); same response
-    // is served on every hit — no cursor, repeatable consumption.
+    // Load the '초기화' recording for this URL as baseline so page-load API
+    // calls are served even when they weren't captured in the test recording.
+    // Same strategy as server mock mode — test recording overwrites same keys.
+    try {
+      const _db = openDb();
+      const initRow = _db.prepare(
+        "SELECT responses FROM recordings WHERE name = '초기화' AND url = ? ORDER BY id DESC LIMIT 1",
+      ).get(rec.url);
+      if (initRow?.responses) {
+        for (const r of tryJson(initRow.responses, []))
+          mockMap.set(canonicalUrl(r.url, opts.stripParams), r);
+      }
+      _db.close();
+    } catch {}
+    // Test recording responses override init (last-write-wins).
     for (const r of recorded) {
       mockMap.set(canonicalUrl(r.url, opts.stripParams), r);
     }
@@ -129,18 +142,27 @@ async function replayRecording(session, rec, opts, cliCookies = []) {
       const rt = request.resourceType();
       if (rt !== "xhr" && rt !== "fetch") return request.continue().catch(() => {});
       const key = canonicalUrl(request.url(), opts.stripParams);
-      const rec = mockMap.get(key);
-      if (!rec || rec.body === null) return request.continue().catch(() => {});
+      const mock = mockMap.get(key);
+      if (!mock || mock.body === null) {
+        // Block unmatched XHR/fetch — same isolation behaviour as server mock mode.
+        if (opts.verbose)
+          console.log(`  ${C.dim}[Mock] 미매칭 차단: ${request.url()}${C.reset}`);
+        return request.respond({
+          status: 503,
+          headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+          body: '{"error":"mock: endpoint not recorded"}',
+        }).catch(() => {});
+      }
       if (opts.verbose)
         console.log(`  ${C.dim}[Mock] ${request.method()} ${request.url()}${C.reset}`);
       await request.respond({
-        status: rec.status,
+        status: mock.status,
         headers: {
-          "content-type": rec.contentType,
+          "content-type": mock.contentType,
           "access-control-allow-origin": "*",
           "access-control-allow-headers": "*",
         },
-        body: rec.body,
+        body: mock.body,
       }).catch(() => {});
     };
     await page.setRequestInterception(true);

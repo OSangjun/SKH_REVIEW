@@ -404,6 +404,11 @@ async function runReplay(
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
+    // Wait for all initial API calls to settle before dispatching the first
+    // recorded event. domcontentloaded fires before async data-fetching
+    // completes, so without this wait the first click/input can land on a
+    // partially-rendered page.
+    await waitNetworkIdle();
 
     // 6. Remove the clear-storage script so subsequent navigations within
     //    this replay are not affected.
