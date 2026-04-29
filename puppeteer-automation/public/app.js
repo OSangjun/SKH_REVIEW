@@ -37,6 +37,10 @@
   const ovSuiteInfo   = document.getElementById('ov-suite-info');
   const ovSuiteResult = document.getElementById('ov-suite-result');
   const suiteBtn      = document.getElementById('suite-btn');
+  const urlTreeBtn    = document.getElementById('url-tree-btn');
+  const urlTreePopup  = document.getElementById('url-tree-popup');
+  const urlTreeBody   = document.getElementById('url-tree-body');
+  const urlTreeCount  = document.getElementById('url-tree-count');
 
   // ── State ─────────────────────────────────────────────────────────────────────
   let ws            = null;
@@ -216,6 +220,8 @@
         }
         updateSuiteBtn();
         renderList();
+        // Re-render the URL tree popup if it's currently open
+        if (!urlTreePopup.classList.contains('hidden')) renderUrlTree();
         break;
       }
 
@@ -420,6 +426,123 @@
 
   goBtn.addEventListener('click', () => navigate(urlInput.value));
   urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(urlInput.value); });
+
+  // ── URL tree popup (origin → paths from existing test cases) ──────────────────
+  // Track which origins are expanded so the user's choice persists across
+  // re-renders triggered by 'recordings' WS events.
+  const expandedOrigins = new Set();
+
+  function originOf(url) {
+    try { return new URL(url).origin; } catch { return ''; }
+  }
+  function pathOf(url) {
+    try {
+      const u = new URL(url);
+      return (u.pathname || '/') + u.search + u.hash;
+    } catch { return url; }
+  }
+
+  function renderUrlTree() {
+    // Group recordings by origin → unique paths (count duplicates)
+    const groups = new Map(); // origin → Map<path, count>
+    for (const r of recordings) {
+      const o = originOf(r.url);
+      if (!o) continue;
+      const p = pathOf(r.url);
+      if (!groups.has(o)) groups.set(o, new Map());
+      const paths = groups.get(o);
+      paths.set(p, (paths.get(p) || 0) + 1);
+    }
+
+    const totalOrigins = groups.size;
+    const totalPaths = [...groups.values()].reduce((a, m) => a + m.size, 0);
+    urlTreeCount.textContent = `${totalOrigins} 도메인 · ${totalPaths} 경로`;
+
+    if (totalOrigins === 0) {
+      urlTreeBody.innerHTML = '<p class="empty-msg url-tree-empty">아직 등록된 테스트 케이스가 없습니다.</p>';
+      return;
+    }
+
+    // Sort origins alphabetically; paths within each by name
+    const sortedOrigins = [...groups.keys()].sort();
+    const html = sortedOrigins.map(origin => {
+      const paths = groups.get(origin);
+      const sortedPaths = [...paths.keys()].sort();
+      const expanded = expandedOrigins.has(origin);
+      const pathsHtml = sortedPaths.map(p => {
+        const count = paths.get(p);
+        const fullUrl = origin + p;
+        const countLabel = count > 1 ? `${count}건` : '';
+        return `<button class="url-tree-path" data-url="${esc(fullUrl)}">
+          <span class="path-text">${esc(p)}</span>
+          ${countLabel ? `<span class="path-count">${countLabel}</span>` : ''}
+        </button>`;
+      }).join('');
+      return `
+        <button class="url-tree-origin ${expanded ? 'expanded' : ''}" data-origin="${esc(origin)}">
+          <span class="twist">▶</span>
+          <span class="origin-host">${esc(origin)}</span>
+          <span class="origin-count">${paths.size}</span>
+        </button>
+        <div class="url-tree-paths ${expanded ? '' : 'hidden'}" data-origin="${esc(origin)}">
+          ${pathsHtml}
+        </div>
+      `;
+    }).join('');
+    urlTreeBody.innerHTML = html;
+  }
+
+  function showUrlTree() {
+    renderUrlTree();
+    urlTreePopup.classList.remove('hidden');
+    urlTreeBtn.classList.add('active');
+  }
+  function hideUrlTree() {
+    urlTreePopup.classList.add('hidden');
+    urlTreeBtn.classList.remove('active');
+  }
+  function toggleUrlTree() {
+    if (urlTreePopup.classList.contains('hidden')) showUrlTree();
+    else hideUrlTree();
+  }
+
+  urlTreeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleUrlTree();
+  });
+
+  // Delegate clicks inside the popup. stopPropagation is critical: after
+  // renderUrlTree() rebuilds the DOM, the original e.target is detached,
+  // which makes the document-level "click outside" handler think the click
+  // was outside the popup and close it.
+  urlTreeBody.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const originBtn = e.target.closest('.url-tree-origin');
+    if (originBtn) {
+      const origin = originBtn.dataset.origin;
+      if (expandedOrigins.has(origin)) expandedOrigins.delete(origin);
+      else expandedOrigins.add(origin);
+      renderUrlTree();
+      return;
+    }
+    const pathBtn = e.target.closest('.url-tree-path');
+    if (pathBtn) {
+      const url = pathBtn.dataset.url;
+      hideUrlTree();
+      navigate(url);
+    }
+  });
+
+  // Close on outside click or Escape
+  document.addEventListener('click', (e) => {
+    if (urlTreePopup.classList.contains('hidden')) return;
+    if (urlTreePopup.contains(e.target)) return;
+    if (urlTreeBtn.contains(e.target)) return;
+    hideUrlTree();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !urlTreePopup.classList.contains('hidden')) hideUrlTree();
+  });
 
   // ── Recording controls ────────────────────────────────────────────────────────
   let _recordBtnTimeout = null;
