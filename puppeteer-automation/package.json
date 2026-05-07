@@ -12,6 +12,7 @@
     "cli:replay": "node src/index.js replay"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.9.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
