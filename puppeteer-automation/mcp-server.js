@@ -22,6 +22,10 @@ const {
   ListToolsRequestSchema,
 } = require("@modelcontextprotocol/sdk/types.js");
 
+const fs             = require("fs");
+const nodePath       = require("path");
+const { execSync }   = require("child_process");
+
 const { dbSaveRecording } = require("./src/server/db");
 const { isApiResponse }   = require("./src/shared/api-filter");
 const { isTrackerUrl }    = require("./src/shared/blocklist");
@@ -277,6 +281,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: "현재 녹화 상태(활성 여부, 이벤트 수, 경과 시간)를 반환합니다.",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "read_file",
+      description:
+        "소스 파일을 읽어 내용을 반환합니다. " +
+        "Vue 컴포넌트, 라우터, API 클라이언트, Spring Boot 컨트롤러 등을 읽어 " +
+        "테스트 시나리오 도출에 활용하세요.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          file_path: { type: "string", description: "읽을 파일의 절대 또는 상대 경로" },
+          max_lines: { type: "number", description: "최대 반환 줄 수 (기본: 500)" },
+        },
+        required: ["file_path"],
+      },
+    },
+    {
+      name: "find_files",
+      description:
+        "디렉토리에서 파일을 검색합니다. " +
+        "예: { dir: './src', pattern: '*.vue' } → 모든 Vue 컴포넌트 목록 반환. " +
+        "node_modules / .git 은 자동 제외됩니다.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          dir:         { type: "string", description: "검색 시작 디렉토리" },
+          pattern:     { type: "string", description: "파일명 패턴 (예: *.vue, *controller*.java)" },
+          max_results: { type: "number", description: "최대 결과 수 (기본: 50)" },
+        },
+        required: ["dir"],
+      },
+    },
   ],
 }));
 
@@ -476,6 +511,54 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           ].join("\n")
         : "상태: 대기 중 (start_recording을 호출하면 녹화를 시작합니다)";
       return { content: [{ type: "text", text }] };
+    }
+
+    // ── read_file ───────────────────────────────────────────────────────────
+    if (name === "read_file") {
+      const { file_path, max_lines = 500 } = args;
+      const abs = nodePath.resolve(file_path);
+      if (!fs.existsSync(abs)) {
+        return { content: [{ type: "text", text: `파일 없음: ${abs}` }], isError: true };
+      }
+      const stat = fs.statSync(abs);
+      if (stat.size > 512 * 1024) {
+        return {
+          content: [{ type: "text", text: `파일이 너무 큽니다 (${Math.round(stat.size / 1024)}KB). max_lines를 줄이거나 find_files로 더 작은 파일을 먼저 탐색하세요.` }],
+          isError: true,
+        };
+      }
+      const raw    = fs.readFileSync(abs, "utf8");
+      const lines  = raw.split("\n");
+      const clipped = lines.length > max_lines;
+      const text   = clipped
+        ? lines.slice(0, max_lines).join("\n") +
+          `\n\n... (총 ${lines.length}줄, 처음 ${max_lines}줄만 표시. max_lines 파라미터로 조정 가능)`
+        : raw;
+      return { content: [{ type: "text", text }] };
+    }
+
+    // ── find_files ──────────────────────────────────────────────────────────
+    if (name === "find_files") {
+      const { dir, pattern = "*", max_results = 50 } = args;
+      const abs = nodePath.resolve(dir);
+      if (!fs.existsSync(abs)) {
+        return { content: [{ type: "text", text: `디렉토리 없음: ${abs}` }], isError: true };
+      }
+      try {
+        const out = execSync(
+          `find "${abs}" -type f -name "${pattern}" ` +
+          `-not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/target/*" -not -path "*/build/*" ` +
+          `| sort | head -${max_results}`,
+          { encoding: "utf8", timeout: 10000 }
+        );
+        const files = out.trim().split("\n").filter(Boolean);
+        const text  = files.length
+          ? files.join("\n") + (files.length >= max_results ? `\n\n(결과가 ${max_results}개로 제한됨)` : "")
+          : "해당 파일 없음";
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `검색 오류: ${err.message}` }], isError: true };
+      }
     }
 
     return {
