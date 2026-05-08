@@ -33,7 +33,7 @@ const { pathUrl }         = require("./src/shared/url");
 
 // ── 브라우저 설정 ─────────────────────────────────────────────────────────────
 const CHROME_PATH = process.env.CHROME_PATH;
-const VIEWPORT    = { width: 1280, height: 800 };
+const VIEWPORT    = { width: 1920, height: 1080 };
 
 // ── MCP 전용 상태 (server.js / state.js 와 완전 독립) ────────────────────────
 let browser = null;
