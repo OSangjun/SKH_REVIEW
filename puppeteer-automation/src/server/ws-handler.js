@@ -18,6 +18,37 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// 초기화 녹화 확정 저장.
+// navigate 후 pendingInitCap에 누적된 응답을 첫 사용자 입력 시점에 호출해 저장한다.
+async function finalizeInitCap() {
+  const cap = state.pendingInitCap;
+  if (!cap) return;
+  state.pendingInitCap = null;
+
+  state.activePage.off("response", cap.handler);
+
+  // 아직 body를 읽는 중인 응답이 있으면 최대 2초 대기
+  if (cap.pending.size > 0)
+    await Promise.race([Promise.allSettled([...cap.pending]), sleep(2000)]);
+
+  if (cap.responses.length === 0) return;
+
+  const existingInitId = dbFindInitByUrl(cap.url);
+  if (existingInitId) {
+    log("info", `[초기화] 이미 존재함 (id=${existingInitId}), 재녹화 생략`);
+    return;
+  }
+
+  const navEv = { type: "navigate", url: cap.url, t: 0 };
+  const events = mapResponsesToEvents([navEv], cap.responses);
+  const newId = dbSaveRecording(
+    "초기화", cap.url, 1, new Date().toISOString(),
+    events, cap.responses, [...state.sessionCookies], [],
+  );
+  send({ type: "recordings", list: dbAllMeta() });
+  log("info", `[초기화] 자동 저장 — id=${newId}, 응답 ${cap.responses.length}건`);
+}
+
 async function handleClientMessage(msg) {
   if (!state.activePage) {
     send({ type: "error", message: "브라우저 세션이 없습니다." });
@@ -27,14 +58,16 @@ async function handleClientMessage(msg) {
   switch (msg.type) {
     // ── Navigation ───────────────────────────────────────────────────────────
     case "navigate": {
+      // 이전 navigate의 pendingInitCap이 남아 있으면 먼저 확정 저장
+      await finalizeInitCap();
+
       state.firstNavigateDone = false;
       if (state.sessionCookies.length > 0)
         await state.activePage.setCookie(...state.sessionCookies);
 
-      // Auto-capture initialization responses (skip if recording/replay in progress)
-      let initCap = null;
+      // 녹화/리플레이 중이 아닐 때만 초기화 캡처 세션 시작
       if (!state.isRecording) {
-        initCap = { responses: [], pending: new Set(), t0: Date.now() };
+        const initCap = { responses: [], pending: new Set(), t0: Date.now(), url: msg.url };
         initCap.handler = (response) => {
           const url = response.url();
           if (url.startsWith("data:") || url.startsWith("blob:")) return;
@@ -44,63 +77,34 @@ async function handleClientMessage(msg) {
           const wantBody = /json|text\/plain|xml/.test(ct);
           const status = response.status();
           const t = Date.now() - initCap.t0;
-          const purl = pathUrl(url); // store path-only for environment portability
+          const purl = pathUrl(url);
           if (!wantBody) {
             initCap.responses.push({ url: purl, status, contentType: ct, body: null, t });
             return;
           }
           const p = response
             .buffer()
-            .then((buf) => {
-              const body = buf.toString("utf8");
-              initCap.responses.push({ url: purl, status, contentType: ct, body, t });
-            })
+            .then((buf) => initCap.responses.push({ url: purl, status, contentType: ct, body: buf.toString("utf8"), t }))
             .catch(() => initCap.responses.push({ url: purl, status, contentType: ct, body: null, t }))
             .finally(() => initCap.pending.delete(p));
           initCap.pending.add(p);
         };
         state.activePage.on("response", initCap.handler);
+        // 핸들러를 state에 보관 — 첫 사용자 입력 시 finalizeInitCap()이 확정 저장
+        state.pendingInitCap = initCap;
       }
 
-      await state.activePage.goto(msg.url, {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      });
+      await state.activePage.goto(msg.url, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-      if (initCap) {
-        // Wait for async API calls to settle after DOMContentLoaded
+      // 페이지 초기 로드 버스트가 끝날 때까지 대기.
+      // 핸들러는 state.pendingInitCap에 살아있어 이후 지연 요청도 계속 캡처.
+      if (state.pendingInitCap) {
         try {
-          await state.activePage.waitForNetworkIdle({ idleTime: 500, timeout: 10000 });
+          await state.activePage.waitForNetworkIdle({ idleTime: 1500, timeout: 15000 });
         } catch {}
-        state.activePage.off("response", initCap.handler);
-        if (initCap.pending.size > 0)
-          await Promise.race([
-            Promise.allSettled([...initCap.pending]),
-            sleep(2000),
-          ]);
-        if (initCap.responses.length > 0) {
-          // Skip if an 초기화 recording already exists for this URL.
-          // Re-record only when the user has deleted it (dbFindInitByUrl returns null).
-          const existingInitId = dbFindInitByUrl(msg.url);
-          if (existingInitId) {
-            log("info", `[초기화] 이미 존재함 (id=${existingInitId}), 재녹화 생략`);
-          } else {
-            const navEv = { type: "navigate", url: msg.url, t: 0 };
-            const events = mapResponsesToEvents([navEv], initCap.responses);
-            const newId = dbSaveRecording(
-              "초기화",
-              msg.url,
-              1,
-              new Date().toISOString(),
-              events,
-              initCap.responses,
-              [...state.sessionCookies],
-              [],
-            );
-            send({ type: "recordings", list: dbAllMeta() });
-            log("info", `[초기화] 자동 저장 — id=${newId}, 응답 ${initCap.responses.length}건`);
-          }
-        }
+        // 초기 버스트의 in-flight body 읽기 완료 대기 (이후 요청은 계속 캡처)
+        if (state.pendingInitCap.pending.size > 0)
+          await Promise.race([Promise.allSettled([...state.pendingInitCap.pending]), sleep(1000)]);
       }
 
       break;
@@ -130,17 +134,21 @@ async function handleClientMessage(msg) {
       await state.activePage.mouse.up({ button: msg.button ?? "left" });
       break;
     case "click":
+      await finalizeInitCap();
       await state.activePage.mouse.click(msg.x, msg.y, { button: msg.button ?? "left" });
       break;
     case "dblclick":
+      await finalizeInitCap();
       await state.activePage.mouse.click(msg.x, msg.y, { clickCount: 2 });
       break;
     case "wheel":
+      await finalizeInitCap();
       await state.activePage.mouse.wheel({ deltaX: msg.deltaX ?? 0, deltaY: msg.deltaY ?? 0 });
       break;
 
     // ── Keyboard events ───────────────────────────────────────────────────────
     case "keydown":
+      await finalizeInitCap();
       await state.activePage.keyboard.down(msg.key === " " ? "Space" : msg.key);
       break;
     case "keyup":
@@ -149,6 +157,7 @@ async function handleClientMessage(msg) {
 
     // ── Recording ─────────────────────────────────────────────────────────────
     case "start-recording":
+      await finalizeInitCap();
       state.isRecording = true;
       state.capturedEvents = [];
       state.capturedResponses = [];
@@ -210,6 +219,7 @@ async function handleClientMessage(msg) {
 
     // ── Replay ────────────────────────────────────────────────────────────────
     case "replay": {
+      await finalizeInitCap();
       const meta = dbGetMeta(msg.id);
       if (!meta) break;
       const events = dbLoadEvents(msg.id);

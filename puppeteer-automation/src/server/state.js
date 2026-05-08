@@ -10,6 +10,9 @@ const state = {
   cdpSession: null,
   activeWs: null,
 
+  // 초기화 녹화 — navigate 후 첫 사용자 입력 전까지 수집, 입력 시점에 확정 저장
+  pendingInitCap: null,
+
   // Recording
   isRecording: false,
   capturedEvents: [],
