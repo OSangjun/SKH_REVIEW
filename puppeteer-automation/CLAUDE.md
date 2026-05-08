@@ -255,3 +255,60 @@ BASE_URL=                 # 옵션: 리플레이 기본 URL 오버라이드
 4. **canonicalUrl**: cache-buster만 제거, 나머지 쿼리파라미터 유지 → 의미있는 파라미터 차이는 다른 응답으로 구분
 5. **triggerMapping**: 이벤트 타임스탬프 기반으로 이벤트↔HTTP 응답 연결 (녹화 시); 리플레이 시 URL로 재검증
 6. **post-loop settlement**: 리플레이 이벤트 루프 완료 후 최대 5회 네트워크 유휴 대기 → A→B→C 연쇄 요청 대응
+
+---
+
+## MCP Agent 모드 — 자동 테스트케이스 녹화 지침
+
+> `mcp-server.js`를 통해 Claude가 직접 브라우저를 조작하며 테스트케이스를 생성할 때 따라야 할 규칙.
+
+### 필수 워크플로우
+
+테스트케이스 1개 = `start_recording` → 액션들 → `stop_recording` 1세트.  
+**`stop_recording`을 빠뜨리면 SQLite에 저장되지 않는다.**
+
+```
+1. (옵션) set_cookies — 로그인 세션 쿠키 주입
+2. start_recording("케이스 이름")
+3. navigate("https://...")
+4. screenshot → get_page_info → 화면 분석
+5. click / type_text / key_press / hover / scroll (필요한 만큼 반복)
+6. screenshot → 결과 확인
+7. stop_recording  ← 반드시 호출
+```
+
+### 테스트케이스 도출 순서
+
+1. **소스 분석** (선택 사항이지만 권장)
+   - `find_files(dir, "*.vue")` / `find_files(dir, "*Controller*.java")` 로 파일 목록 파악
+   - `read_file` 로 라우터, 폼 컴포넌트, API 클라이언트 읽기
+   - 라우트 목록, 폼 필드, 유효성 규칙, 에러 케이스 정리
+
+2. **테스트 시나리오 계획** — 코드 분석 결과를 바탕으로 케이스 목록 수립
+   - 정상 경로 (Happy path)
+   - 필수값 누락 / 형식 오류 (Validation error)
+   - 권한 없는 접근
+   - 경계값 (빈 목록, 최대값 등)
+
+3. **케이스별 녹화** — 시나리오 순서대로 `start_recording → stop_recording` 반복
+
+### 케이스 이름 규칙
+
+```
+"[화면명] - [시나리오]"
+예: "로그인 - 정상", "로그인 - 비밀번호 오류", "사용자 목록 - 빈 목록"
+```
+
+### 쿠키가 필요한 경우
+
+로그인이 필요한 페이지를 녹화할 때:
+```
+set_cookies([{ name: "SESSION", value: "...", domain: ".example.com" }])
+→ 이후 모든 navigate에 자동 적용
+→ stop_recording 시 쿠키도 케이스에 함께 저장 (리플레이 시 자동 복원)
+```
+
+### 녹화 확인
+
+`stop_recording` 완료 후 반환된 케이스 ID를 사용자에게 알린다.  
+웹 UI(`http://localhost:3000`) 또는 CLI(`node run-tests.js --id <id>`)로 즉시 리플레이 가능.
