@@ -49,6 +49,9 @@ const rec = {
   pending:   new Set(),
 };
 
+// 세션 쿠키 — 브라우저 재시작 없이 navigate 간 유지, 녹화에 함께 저장
+let sessionCookies = [];
+
 // ── 브라우저 초기화 ───────────────────────────────────────────────────────────
 async function ensureBrowser() {
   if (page && !page.isClosed()) return;
@@ -282,6 +285,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "set_cookies",
+      description:
+        "브라우저에 쿠키를 설정합니다. 이후의 모든 navigate에 자동 적용되며, " +
+        "녹화 종료(stop_recording) 시 케이스와 함께 저장됩니다. " +
+        "로그인 세션 쿠키를 미리 주입할 때 사용하세요.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          cookies: {
+            type: "array",
+            description: "Puppeteer 쿠키 객체 배열",
+            items: {
+              type: "object",
+              properties: {
+                name:     { type: "string",  description: "쿠키 이름 (필수)" },
+                value:    { type: "string",  description: "쿠키 값 (필수)" },
+                domain:   { type: "string",  description: "도메인 (예: .example.com). 생략 시 현재 페이지 도메인 사용" },
+                path:     { type: "string",  description: "경로 (기본: /)" },
+                secure:   { type: "boolean", description: "HTTPS 전용 여부" },
+                httpOnly: { type: "boolean", description: "JS 접근 차단 여부" },
+                sameSite: { type: "string",  description: "SameSite 값: Strict | Lax | None" },
+              },
+              required: ["name", "value"],
+            },
+          },
+        },
+        required: ["cookies"],
+      },
+    },
+    {
+      name: "get_cookies",
+      description: "현재 브라우저에 설정된 쿠키 목록을 반환합니다.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "특정 URL의 쿠키만 조회 (생략 시 현재 페이지)" },
+        },
+      },
+    },
+    {
+      name: "clear_cookies",
+      description: "브라우저의 모든 쿠키를 삭제하고 세션 쿠키 목록을 초기화합니다.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
       name: "read_file",
       description:
         "소스 파일을 읽어 내용을 반환합니다. " +
@@ -479,8 +527,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         new Date().toISOString(),
         rec.events,
         rec.responses,
-        [],  // cookies
-        [],  // toasts
+        sessionCookies,  // 녹화 시점 세션 쿠키 저장 → 리플레이 시 자동 복원
+        [],              // toasts
       );
 
       return {
@@ -511,6 +559,68 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           ].join("\n")
         : "상태: 대기 중 (start_recording을 호출하면 녹화를 시작합니다)";
       return { content: [{ type: "text", text }] };
+    }
+
+    // ── set_cookies ─────────────────────────────────────────────────────────
+    if (name === "set_cookies") {
+      const incoming = (args.cookies ?? []).filter((c) => c.name && c.value);
+      if (incoming.length === 0) {
+        return { content: [{ type: "text", text: "설정할 쿠키가 없습니다. name과 value는 필수입니다." }], isError: true };
+      }
+      // 현재 페이지 도메인을 domain 기본값으로 사용
+      const currentUrl = page.url();
+      const defaultDomain = currentUrl !== "about:blank"
+        ? new URL(currentUrl).hostname
+        : undefined;
+
+      const normalized = incoming.map((c) => ({
+        ...c,
+        domain: c.domain || defaultDomain,
+        path:   c.path   || "/",
+      }));
+
+      await page.setCookie(...normalized);
+
+      // 기존 sessionCookies에서 같은 name+domain 쿠키는 교체
+      for (const nc of normalized) {
+        const idx = sessionCookies.findIndex(
+          (sc) => sc.name === nc.name && sc.domain === nc.domain
+        );
+        if (idx >= 0) sessionCookies[idx] = nc;
+        else sessionCookies.push(nc);
+      }
+
+      const lines = normalized.map((c) => `  ${c.name}=${c.value} (domain: ${c.domain || "현재"})`);
+      return {
+        content: [{
+          type: "text",
+          text: `쿠키 ${normalized.length}개 설정 완료:\n${lines.join("\n")}`,
+        }],
+      };
+    }
+
+    // ── get_cookies ─────────────────────────────────────────────────────────
+    if (name === "get_cookies") {
+      const targetUrl = args.url || page.url();
+      const cookies   = targetUrl !== "about:blank"
+        ? await page.cookies(targetUrl)
+        : await page.cookies();
+      if (cookies.length === 0) {
+        return { content: [{ type: "text", text: "설정된 쿠키가 없습니다." }] };
+      }
+      const lines = cookies.map(
+        (c) => `  ${c.name}=${c.value}  (domain: ${c.domain}, path: ${c.path}${c.httpOnly ? ", httpOnly" : ""}${c.secure ? ", secure" : ""})`
+      );
+      return { content: [{ type: "text", text: `쿠키 ${cookies.length}개:\n${lines.join("\n")}` }] };
+    }
+
+    // ── clear_cookies ────────────────────────────────────────────────────────
+    if (name === "clear_cookies") {
+      const client = await page.createCDPSession();
+      await client.send("Network.clearBrowserCookies");
+      await client.detach();
+      sessionCookies = [];
+      return { content: [{ type: "text", text: "모든 쿠키 삭제 완료." }] };
     }
 
     // ── read_file ───────────────────────────────────────────────────────────
