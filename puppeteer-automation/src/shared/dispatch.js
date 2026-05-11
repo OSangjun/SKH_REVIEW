@@ -260,8 +260,47 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
         try {
           const el = await pickByLabelOrFirst(page, ev.selector, ev.label);
           if (el) {
-            const cur = await el.evaluate((n) => n.checked);
-            if (cur !== ev.checked) await el.click();
+            // El Plus checkbox/radio: the recorded selector points to the hidden
+            // <input class="el-checkbox__original"> (opacity:0 / position:absolute).
+            // Puppeteer refuses to click invisible elements, so we locate the
+            // nearest visible clickable ancestor and use its current viewport center.
+            const info = await el.evaluate((input) => {
+              const s = window.getComputedStyle(input);
+              const hidden =
+                parseFloat(s.opacity) < 0.1 ||
+                s.visibility === "hidden"     ||
+                s.display === "none"          ||
+                (s.position === "absolute" && input.offsetWidth === 0 && input.offsetHeight === 0);
+
+              const cur = input.indeterminate ? null : input.checked;
+
+              if (!hidden) return { cur, cx: null, cy: null };
+
+              // Walk up to find the visible El Plus wrapper label or the inner span
+              const candidates = [
+                input.closest("label.el-checkbox, label.el-radio, label.el-checkbox-button, label.el-radio-button"),
+                input.parentElement && input.parentElement.querySelector(".el-checkbox__inner, .el-radio__inner"),
+                input.parentElement,
+              ];
+              for (const c of candidates) {
+                if (!c) continue;
+                const r = c.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                  c.scrollIntoView({ block: "nearest" });
+                  const r2 = c.getBoundingClientRect();
+                  return { cur, cx: r2.left + r2.width / 2, cy: r2.top + r2.height / 2 };
+                }
+              }
+              return { cur, cx: null, cy: null };
+            });
+
+            if (info.cur !== ev.checked) {
+              if (info.cx !== null) {
+                await page.mouse.click(info.cx, info.cy);
+              } else {
+                await el.click();
+              }
+            }
             break;
           }
         } catch {}
