@@ -1,60 +1,98 @@
 "use strict";
 
-// DB query client supporting PostgreSQL, MariaDB, and Tibero (via ODBC).
-// Engine is selected by DB_ENGINE env var: pg | mariadb | tibero
-// Connection: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
-// Tibero: TIBERO_ODBC_DSN (requires odbc npm + Tibero ODBC driver installed)
+/**
+ * db-client.js — 이중 DB 클라이언트 (center / local)
+ *
+ * 환경변수 네이밍:
+ *   Center DB : CENTER_DB_ENGINE, CENTER_DB_HOST, CENTER_DB_PORT,
+ *               CENTER_DB_USER, CENTER_DB_PASSWORD, CENTER_DB_NAME
+ *               CENTER_TIBERO_ODBC_DSN (Tibero only)
+ *
+ *   Local  DB : DB_ENGINE, DB_HOST, DB_PORT,
+ *               DB_USER, DB_PASSWORD, DB_NAME
+ *               TIBERO_ODBC_DSN (Tibero only)
+ *
+ * Supported engines: pg | mariadb | tibero
+ * Tibero requires odbc npm package + Tibero ODBC driver + DSN configured.
+ */
 
-const ENGINE = (process.env.DB_ENGINE || "").toLowerCase();
+// ── Config readers ───────────────────────────────────────────────────────────
 
-function isConfigured() {
-  if (ENGINE === "tibero") return !!process.env.TIBERO_ODBC_DSN;
-  return !!(ENGINE && process.env.DB_HOST && process.env.DB_NAME);
+function readConfig(name) {
+  const pfx = name === "center" ? "CENTER_" : "";
+  const engine = (process.env[`${pfx}DB_ENGINE`] || "").toLowerCase();
+  return {
+    engine,
+    host:     process.env[`${pfx}DB_HOST`]     || "localhost",
+    port:     parseInt(process.env[`${pfx}DB_PORT`] || "0", 10),
+    user:     process.env[`${pfx}DB_USER`]     || "",
+    password: process.env[`${pfx}DB_PASSWORD`] || "",
+    database: process.env[`${pfx}DB_NAME`]     || "",
+    odbc:     process.env[name === "center" ? "CENTER_TIBERO_ODBC_DSN" : "TIBERO_ODBC_DSN"] || "",
+  };
 }
 
-function getEngine() { return ENGINE; }
+function isConfigured(name = "local") {
+  const cfg = readConfig(name);
+  if (!cfg.engine) return false;
+  if (cfg.engine === "tibero") return !!cfg.odbc;
+  return !!(cfg.host && cfg.database);
+}
 
-// Lazy pool creation — created on first query.
-let _pool = null;
-let _odbc = null;
+// Returns list of configured DB names (for tool registration & logging)
+function configuredDbs() {
+  const list = [];
+  if (isConfigured("local"))  list.push("local");
+  if (isConfigured("center")) list.push("center");
+  return list;
+}
 
-async function getPool() {
-  if (_pool) return _pool;
+// ── Pool cache ───────────────────────────────────────────────────────────────
 
-  const host     = process.env.DB_HOST || "localhost";
-  const port     = parseInt(process.env.DB_PORT || "0", 10);
-  const user     = process.env.DB_USER || "";
-  const password = process.env.DB_PASSWORD || "";
-  const database = process.env.DB_NAME || "";
+const _pools = { local: null, center: null };
 
-  if (ENGINE === "pg") {
+async function getPool(name) {
+  if (_pools[name]) return _pools[name];
+
+  const cfg = readConfig(name);
+
+  if (cfg.engine === "pg") {
     const { Pool } = require("pg");
-    _pool = new Pool({ host, port: port || 5432, user, password, database, max: 3 });
-    return _pool;
+    _pools[name] = new Pool({
+      host: cfg.host, port: cfg.port || 5432,
+      user: cfg.user, password: cfg.password, database: cfg.database,
+      max: 3,
+    });
+    return _pools[name];
   }
 
-  if (ENGINE === "mariadb") {
+  if (cfg.engine === "mariadb") {
     const mysql = require("mysql2/promise");
-    _pool = mysql.createPool({ host, port: port || 3306, user, password, database, connectionLimit: 3 });
-    return _pool;
+    _pools[name] = mysql.createPool({
+      host: cfg.host, port: cfg.port || 3306,
+      user: cfg.user, password: cfg.password, database: cfg.database,
+      connectionLimit: 3,
+    });
+    return _pools[name];
   }
 
-  if (ENGINE === "tibero") {
-    const odbc = require("odbc");
-    _odbc = odbc;
-    return null;
+  if (cfg.engine === "tibero") {
+    return null; // Tibero uses per-query connections via ODBC
   }
 
-  throw new Error(`지원하지 않는 DB_ENGINE: ${ENGINE}`);
+  throw new Error(`지원하지 않는 DB 엔진: ${cfg.engine} (${name})`);
 }
 
-// Execute a query and return rows array.
-async function query(sql, params = []) {
-  if (!isConfigured()) throw new Error("DB 연결 정보가 설정되지 않았습니다.");
+// ── Query ────────────────────────────────────────────────────────────────────
 
-  if (ENGINE === "tibero") {
+async function query(sql, params = [], name = "local") {
+  if (!isConfigured(name)) throw new Error(`${name} DB가 설정되지 않았습니다.`);
+
+  const cfg = readConfig(name);
+
+  if (cfg.engine === "tibero") {
     const odbc = require("odbc");
-    const conn = await odbc.connect(`DSN=${process.env.TIBERO_ODBC_DSN}`);
+    const conn = await odbc.connect(`DSN=${cfg.odbc}`);
     try {
       const result = await conn.query(sql, params);
       return Array.from(result);
@@ -63,24 +101,30 @@ async function query(sql, params = []) {
     }
   }
 
-  const pool = await getPool();
+  const pool = await getPool(name);
 
-  if (ENGINE === "pg") {
+  if (cfg.engine === "pg") {
     const { rows } = await pool.query(sql, params);
     return rows;
   }
 
-  if (ENGINE === "mariadb") {
+  if (cfg.engine === "mariadb") {
     const [rows] = await pool.execute(sql, params);
     return rows;
   }
 }
 
-// Release pool on process exit.
+// ── Cleanup ──────────────────────────────────────────────────────────────────
+
 async function close() {
-  if (_pool && ENGINE === "pg")      await _pool.end().catch(() => {});
-  if (_pool && ENGINE === "mariadb") await _pool.end().catch(() => {});
-  _pool = null;
+  for (const name of ["local", "center"]) {
+    const pool = _pools[name];
+    if (!pool) continue;
+    const cfg = readConfig(name);
+    if (cfg.engine === "pg" || cfg.engine === "mariadb")
+      await pool.end().catch(() => {});
+    _pools[name] = null;
+  }
 }
 
-module.exports = { isConfigured, getEngine, query, close };
+module.exports = { isConfigured, configuredDbs, query, close };

@@ -75,18 +75,20 @@ function buildTools() {
     );
   }
 
-  // DB tool (only if configured)
-  if (db.isConfigured()) {
+  // DB tool (only if at least one DB is configured)
+  const configuredDbs = db.configuredDbs();
+  if (configuredDbs.length > 0) {
     tools.push({
       name: "db_query",
-      description: `데이터베이스(${db.getEngine()})에 SQL을 실행하여 테스트 데이터를 조회합니다. SELECT만 사용하세요.`,
+      description: `데이터베이스에 SQL을 실행하여 테스트 데이터를 조회합니다. db 파라미터로 접속할 DB를 지정하세요 (${configuredDbs.join(", ")}). SELECT만 허용.\n- local DB: 도메인/업무 데이터 (사용자, 계정, 거래 데이터 등)\n- center DB: 공통/마스터 데이터 (코드, 권한, 기준 데이터 등)`,
       input_schema: {
         type: "object",
         properties: {
-          sql:    { type: "string", description: "실행할 SQL 쿼리 (SELECT만 허용)" },
+          sql:    { type: "string", description: "실행할 SELECT SQL 쿼리" },
           params: { type: "array",  description: "바인딩 파라미터 배열", items: { type: "string" } },
+          db:     { type: "string", enum: configuredDbs, description: `조회할 DB 이름 (${configuredDbs.join(" | ")})` },
         },
-        required: ["sql"],
+        required: ["sql", "db"],
       },
     });
   }
@@ -267,8 +269,9 @@ async function executeTool(name, input) {
       case "db_query": {
         const sql = (input.sql || "").trim();
         if (!/^select/i.test(sql)) return { error: "SELECT 쿼리만 허용됩니다." };
-        const rows = await db.query(sql, input.params || []);
-        return { rows, count: rows.length };
+        const dbName = input.db || "local";
+        const rows = await db.query(sql, input.params || [], dbName);
+        return { rows, count: rows.length, db: dbName };
       }
 
       // ── Browser ──
@@ -412,33 +415,68 @@ async function runAnalysis(url) {
     } catch {}
 
     const systemPrompt = `당신은 웹 애플리케이션 QA 엔지니어입니다.
-주어진 URL의 페이지를 분석하여 테스트 케이스를 도출하고 직접 레코딩합니다.
+주어진 URL의 페이지를 UI부터 백엔드까지 전체 스택을 분석하여 테스트 케이스를 도출하고 직접 레코딩합니다.
 
-## 수행 순서
-1. gitlab_list_files / gitlab_get_file / gitlab_search_code 로 현재 페이지와 관련된 Vue 컴포넌트, API Controller 소스 수집
-   (GitLab 도구가 없으면 생략하고 browser_get_page_info로 DOM 기반 분석)
-2. 소스/DOM에서 비즈니스 로직을 파악하여 테스트 케이스 목록 계획:
-   - 정상 경로 (Happy path)
-   - 유효성 검증 오류 (필수값 누락, 형식 오류)
-   - 권한/인증 경계
-   - 경계값 / 빈 목록
-3. db_query 로 테스트에 필요한 실제 데이터 조회
-   (DB 도구가 없으면 생략)
-4. 각 테스트 케이스별로:
-   a. recording_start("케이스명")  ← 반드시 호출
-   b. browser_navigate(url)
-   c. browser_screenshot → 화면 확인
-   d. browser_click / browser_type / browser_key_press 등으로 시나리오 수행
-   e. recording_stop()  ← 반드시 호출
+## 분석 단계 (순서대로 수행)
+
+### Phase 1: 라우터 → Vue 컴포넌트 탐색 (GitLab 도구가 있을 때)
+1. gitlab_list_files("") 로 프로젝트 루트 구조 파악
+2. gitlab_search_code 로 현재 URL 경로에 해당하는 Vue Router 설정 검색
+   예: URL이 "/login" 이면 "path: '/login'" 또는 "'/login'" 검색
+3. 라우터에서 매핑된 Vue 컴포넌트 파일 경로 확인
+4. gitlab_get_file 로 해당 컴포넌트 파일 읽기
+
+### Phase 2: Vue 컴포넌트 → 하위 컴포넌트 / API 클라이언트 탐색
+1. 컴포넌트 import 문에서 하위 컴포넌트, composable, API 클라이언트(src/api/ 등) 파악
+2. 각 참조 파일을 gitlab_get_file 로 추가 읽기
+3. 수집 정보:
+   - 폼 필드 목록 (v-model, :value 바인딩)
+   - 유효성 검증 규칙 (required, pattern, min/max 등)
+   - 이벤트 핸들러 및 API 호출 함수
+   - API 엔드포인트 경로 (예: '/api/v1/users', '/api/auth/login')
+
+### Phase 3: API 클라이언트 → 백엔드 컨트롤러 / 서비스 탐색
+1. API 클라이언트 파일에서 엔드포인트 경로 추출
+2. gitlab_search_code 로 해당 경로를 처리하는 백엔드 컨트롤러 검색
+   예: "@GetMapping(\"/users\")" 또는 "router.get('/users'" 검색
+3. 컨트롤러 파일 읽기 → 서비스 파일로 이동
+4. 수집 정보:
+   - 비즈니스 로직 분기 조건
+   - 권한/인증 검사 (예: @PreAuthorize, middleware)
+   - DB 쿼리에서 사용하는 테이블/컬럼 파악
+
+### Phase 4: DB 데이터 조회 (DB 도구가 있을 때)
+- center DB: 공통/마스터 데이터 조회 (공통코드, 권한, 기준 데이터 등)
+- local DB: 도메인/업무 데이터 조회 (사용자, 계정, 거래 데이터 등)
+- 각 DB에서 테스트에 필요한 실제 ID, 코드값, 조건값 획득
+- 두 DB 모두 설정된 경우 두 곳 모두 조회
+
+### Phase 5: 테스트 케이스 계획 및 레코딩
+소스 분석 결과를 바탕으로 아래 유형의 케이스 계획:
+- 정상 경로 (Happy path): 유효한 데이터로 성공 시나리오
+- 유효성 검증 오류: 필수값 누락, 형식 오류, 범위 초과
+- 권한/인증 경계: 미인증 접근, 권한 없는 작업
+- 경계값: 빈 목록, 최대값, 특수문자
+
+각 케이스 레코딩 순서:
+a. recording_start("케이스명")  ← 반드시 호출
+b. browser_navigate(url)
+c. browser_screenshot → 화면 확인
+d. browser_click / browser_type / browser_key_press 등으로 시나리오 수행
+e. recording_stop()  ← 반드시 호출
 
 ## 케이스 이름 규칙
 "[화면명] - [시나리오]"
 예: "로그인 - 정상", "로그인 - 비밀번호 오류", "사용자 목록 - 검색"
 
+## 대체 전략
+- GitLab 도구 없음: browser_get_page_info + browser_screenshot 으로 DOM 기반 분석
+- DB 도구 없음: 고정 테스트 데이터로 시나리오 구성
+
 ## 주의사항
-- recording_start와 recording_stop은 반드시 짝으로 호출
-- 한 케이스가 끝나면 바로 다음 케이스 시작
-- 분석이 완료되면 도구 호출 없이 완료 메시지만 반환`;
+- recording_start와 recording_stop은 반드시 짝으로 호출 (짝이 맞지 않으면 저장 안 됨)
+- 한 케이스 recording_stop 후 즉시 다음 케이스 시작
+- 분석 완료 후 도구 호출 없이 완료 메시지만 반환`;
 
     const userMessage = `현재 URL: ${url}
 
