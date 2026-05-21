@@ -1239,6 +1239,70 @@ body.log-collapsed #log-body { display: none; }
   color: var(--rec-color);
 }
 
+/* ── 분석 에이전트 상태 패널 ─────────────────────────────────────────────── */
+#ov-agents {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  background: rgba(10,12,16,.88);
+  border-bottom: 1px solid var(--border);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+#ov-agents.hidden { display: none; }
+
+.ov-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-right: 1px solid rgba(255,255,255,.05);
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  overflow: hidden;
+}
+.ov-agent-icon {
+  font-size: 12px;
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.ov-agent-icon.pending  { color: var(--text-dim); }
+.ov-agent-icon.running  { color: var(--accent); display: inline-block; animation: ov-spin .9s linear infinite; }
+.ov-agent-icon.done     { color: #22c55e; }
+.ov-agent-icon.error    { color: var(--rec-color); }
+@keyframes ov-spin { to { transform: rotate(360deg); } }
+
+.ov-agent-name {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-mid);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 68px;
+  letter-spacing: -.2px;
+}
+.ov-agent-msg {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+/* 분석 모드에서 strip 색상 변경 */
+#replay-overlay.analyzing .ov-strip-label { color: #a78bfa; }
+#replay-overlay.analyzing .ov-bar-fill {
+  background: linear-gradient(90deg, #7c3aed 0%, #a78bfa 100%);
+  box-shadow: 0 0 8px rgba(167,139,250,.7);
+}
+
+/* ── analyze-finding 로그 항목 ─────────────────────────────────────────── */
+.log-line.finding .log-msg::before {
+  content: "📌 ";
+}
+.log-line.finding .log-msg { color: #a78bfa; }
+.log-line.synthesis .log-msg { color: #22c55e; }
+
 /* ── Cookie button — has-cookies state highlights with warn color ─────────── */
 .btn-cookie.has-cookies {
   border-color: var(--warn-color);

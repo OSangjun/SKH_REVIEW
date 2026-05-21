@@ -1,220 +1,252 @@
 "use strict";
 
 /**
- * analyzer.js — 분석 버튼 에이전트
+ * analyzer.js — 멀티 에이전트 분석 시스템
  *
- * runAnalysis(url):
- *   1. GitLab REST API로 현재 페이지 관련 소스 수집
- *   2. Claude (claude-sonnet-4-6) tool_use 루프로 비즈니스 로직 분석
- *   3. DB 쿼리로 실제 테스트 데이터 획득
- *   4. 각 테스트 케이스를 브라우저에서 직접 레코딩
+ * 에이전트 팀:
+ *   UIAgent      : 현재 페이지 DOM/화면 구조 분석
+ *   FrontendAgent: Vue Router → 컴포넌트 → API 클라이언트 탐색
+ *   BackendAgent : API 엔드포인트 → 컨트롤러 → 서비스 탐색
+ *   DBAgent      : center/local DB 테스트 데이터 조회
+ *   LeadAgent    : 모든 에이전트 결과 취합 → 테스트 케이스 도출
+ *   RecordingAgent: 각 테스트 케이스를 브라우저에서 직접 레코딩
+ *
+ * 통신 프로토콜 (WebSocket → 클라이언트):
+ *   analyze-started   { url }
+ *   analyze-phase     { phase, total, label }
+ *   analyze-agent     { agent, label, status, message }
+ *   analyze-finding   { agent, label, findingType, title, description }
+ *   analyze-synthesis { testCases: [{name, expectedResult}] }
+ *   analyze-recording { name, index, total }
+ *   analyze-done      { created }
+ *   analyze-error     { message }
  */
 
 const Anthropic = require("@anthropic-ai/sdk");
-const state = require("./state");
+const state     = require("./state");
 const { send, log } = require("./comms");
 const { dbSaveRecording, dbUpdateName, dbAllMeta } = require("./db");
 const { mapResponsesToEvents } = require("./replay");
 const { isApiResponse } = require("../shared/api-filter");
-const { isTrackerUrl } = require("../shared/blocklist");
-const { pathUrl } = require("../shared/url");
+const { isTrackerUrl }  = require("../shared/blocklist");
+const { pathUrl }       = require("../shared/url");
 const gitlab = require("./gitlab-client");
-const db = require("./db-client");
+const db     = require("./db-client");
 
 const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
+const client    = new Anthropic();
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
 async function waitIdle(timeout = 8000, idleTime = 500) {
   try { await state.activePage.waitForNetworkIdle({ idleTime, timeout }); } catch {}
 }
 
-// ── Tool definitions ────────────────────────────────────────────────────────
+// ── 공통 도구 정의 ──────────────────────────────────────────────────────────
 
-function buildTools() {
-  const tools = [];
+// 에이전트가 비즈니스 로직 발견 시 즉시 리드에이전트에게 전달하는 도구
+const SEND_FINDING_TOOL = {
+  name: "send_finding",
+  description: "비즈니스 로직, API 엔드포인트, 유효성 규칙, 에러 시나리오 등을 발견했을 때 즉시 리드 에이전트에게 전달합니다. 중요한 발견사항이 있을 때마다 분석을 멈추지 말고 이 도구로 전달하세요.",
+  input_schema: {
+    type: "object",
+    properties: {
+      findingType: {
+        type: "string",
+        enum: ["business_logic", "api_endpoint", "validation_rule", "error_scenario", "db_table", "auth_rule", "test_scenario"],
+        description: "발견 유형",
+      },
+      title:       { type: "string", description: "발견 내용 제목 (간결하게)" },
+      description: { type: "string", description: "상세 설명" },
+      data:        { type: "object", description: "관련 데이터 (선택)" },
+    },
+    required: ["findingType", "title"],
+  },
+};
 
-  // GitLab tools (only if configured)
-  if (gitlab.isConfigured()) {
-    tools.push(
-      {
-        name: "gitlab_list_files",
-        description: "GitLab 저장소의 특정 경로에 있는 파일/디렉터리 목록을 반환합니다.",
-        input_schema: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "조회할 경로 (예: 'src/views'). 빈 문자열이면 루트." },
-            ref:  { type: "string", description: "브랜치/태그/커밋 (기본값: main)" },
-          },
-          required: [],
-        },
-      },
-      {
-        name: "gitlab_get_file",
-        description: "GitLab 저장소에서 특정 파일의 내용을 반환합니다.",
-        input_schema: {
-          type: "object",
-          properties: {
-            file_path: { type: "string", description: "파일 경로 (예: 'src/views/Login.vue')" },
-            ref: { type: "string", description: "브랜치/태그/커밋 (기본값: main)" },
-          },
-          required: ["file_path"],
-        },
-      },
-      {
-        name: "gitlab_search_code",
-        description: "GitLab 저장소에서 코드를 검색합니다.",
-        input_schema: {
-          type: "object",
-          properties: {
-            query: { type: "string", description: "검색어" },
-          },
-          required: ["query"],
-        },
-      },
-    );
-  }
+const REPORT_TOOL = {
+  name: "report_findings",
+  description: "분석을 모두 마친 후 최종 결과를 구조화된 JSON으로 제출합니다. 분석 완료 시 반드시 이 도구를 마지막으로 호출하세요.",
+  input_schema: {
+    type: "object",
+    properties: {
+      findings: { type: "object", description: "최종 분석 결과 (자유 형식 JSON)" },
+    },
+    required: ["findings"],
+  },
+};
 
-  // DB tool (only if at least one DB is configured)
-  const configuredDbs = db.configuredDbs();
-  if (configuredDbs.length > 0) {
-    tools.push({
-      name: "db_query",
-      description: `데이터베이스에 SQL을 실행하여 테스트 데이터를 조회합니다. db 파라미터로 접속할 DB를 지정하세요 (${configuredDbs.join(", ")}). SELECT만 허용.\n- local DB: 도메인/업무 데이터 (사용자, 계정, 거래 데이터 등)\n- center DB: 공통/마스터 데이터 (코드, 권한, 기준 데이터 등)`,
-      input_schema: {
-        type: "object",
-        properties: {
-          sql:    { type: "string", description: "실행할 SELECT SQL 쿼리" },
-          params: { type: "array",  description: "바인딩 파라미터 배열", items: { type: "string" } },
-          db:     { type: "string", enum: configuredDbs, description: `조회할 DB 이름 (${configuredDbs.join(" | ")})` },
-        },
-        required: ["sql", "db"],
+const GITLAB_TOOLS = [
+  {
+    name: "gitlab_list_files",
+    description: "GitLab 저장소 특정 경로의 파일/디렉터리 목록을 반환합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "조회 경로 (빈 문자열이면 루트)" },
+        ref:  { type: "string", description: "브랜치/태그 (기본값: main)" },
       },
-    });
-  }
+      required: [],
+    },
+  },
+  {
+    name: "gitlab_get_file",
+    description: "GitLab 저장소에서 특정 파일의 전체 내용을 반환합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        file_path: { type: "string", description: "파일 경로 (예: src/views/Login.vue)" },
+        ref:       { type: "string", description: "브랜치/태그 (기본값: main)" },
+      },
+      required: ["file_path"],
+    },
+  },
+  {
+    name: "gitlab_search_code",
+    description: "GitLab 저장소 전체에서 코드를 검색합니다.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "검색어" } },
+      required: ["query"],
+    },
+  },
+];
 
-  // Browser tools
-  tools.push(
-    {
-      name: "browser_screenshot",
-      description: "현재 브라우저 화면의 스크린샷을 base64 JPEG로 반환합니다.",
-      input_schema: { type: "object", properties: {}, required: [] },
+const BROWSER_TOOLS = [
+  {
+    name: "browser_screenshot",
+    description: "현재 브라우저 화면의 스크린샷을 base64 JPEG로 반환합니다.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "browser_navigate",
+    description: "브라우저를 특정 URL로 이동합니다.",
+    input_schema: {
+      type: "object",
+      properties: { url: { type: "string", description: "이동할 URL" } },
+      required: ["url"],
     },
-    {
-      name: "browser_navigate",
-      description: "브라우저를 특정 URL로 이동합니다.",
-      input_schema: {
-        type: "object",
-        properties: { url: { type: "string", description: "이동할 URL" } },
-        required: ["url"],
+  },
+  {
+    name: "browser_click",
+    description: "CSS 선택자 또는 좌표로 요소를 클릭합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS 선택자" },
+        x:        { type: "number" },
+        y:        { type: "number" },
+        label:    { type: "string", description: "요소 텍스트 레이블 (동명 요소 구분)" },
       },
+      required: [],
     },
-    {
-      name: "browser_click",
-      description: "CSS 선택자 또는 좌표로 요소를 클릭합니다.",
-      input_schema: {
-        type: "object",
-        properties: {
-          selector: { type: "string", description: "CSS 선택자 (없으면 x, y 좌표 사용)" },
-          x: { type: "number" },
-          y: { type: "number" },
-          label: { type: "string", description: "클릭할 요소의 텍스트 레이블 (선택사항, 동명 요소 구분용)" },
-        },
-        required: [],
+  },
+  {
+    name: "browser_type",
+    description: "입력 필드에 텍스트를 입력합니다. 기존 값은 삭제됩니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS 선택자" },
+        text:     { type: "string", description: "입력할 텍스트" },
       },
+      required: ["text"],
     },
-    {
-      name: "browser_type",
-      description: "입력 필드에 텍스트를 입력합니다. 기존 값은 지워집니다.",
-      input_schema: {
-        type: "object",
-        properties: {
-          selector: { type: "string", description: "CSS 선택자" },
-          text: { type: "string", description: "입력할 텍스트" },
-        },
-        required: ["text"],
-      },
+  },
+  {
+    name: "browser_key_press",
+    description: "키보드 키를 누릅니다 (예: Enter, Tab, Escape).",
+    input_schema: {
+      type: "object",
+      properties: { key: { type: "string", description: "키 이름 (예: Enter, Tab)" } },
+      required: ["key"],
     },
-    {
-      name: "browser_key_press",
-      description: "키보드 키를 누릅니다 (예: Enter, Tab, Escape).",
-      input_schema: {
-        type: "object",
-        properties: { key: { type: "string", description: "키 이름 (예: Enter, Tab, Escape, ArrowDown)" } },
-        required: ["key"],
-      },
+  },
+  {
+    name: "browser_scroll",
+    description: "페이지를 특정 위치로 스크롤합니다.",
+    input_schema: {
+      type: "object",
+      properties: { x: { type: "number" }, y: { type: "number" } },
+      required: ["x", "y"],
     },
-    {
-      name: "browser_scroll",
-      description: "페이지를 스크롤합니다.",
-      input_schema: {
-        type: "object",
-        properties: {
-          x: { type: "number", description: "스크롤 X 위치" },
-          y: { type: "number", description: "스크롤 Y 위치" },
-        },
-        required: ["x", "y"],
-      },
-    },
-    {
-      name: "browser_get_page_info",
-      description: "현재 페이지의 URL, 제목, 주요 입력 요소 목록을 반환합니다.",
-      input_schema: { type: "object", properties: {}, required: [] },
-    },
-    {
-      name: "recording_start",
-      description: "테스트 케이스 레코딩을 시작합니다. 이후 browser_* 도구로 조작한 내용이 기록됩니다.",
-      input_schema: {
-        type: "object",
-        properties: { name: { type: "string", description: "테스트 케이스 이름 (예: '로그인 - 정상')" } },
-        required: ["name"],
-      },
-    },
-    {
-      name: "recording_stop",
-      description: "현재 레코딩을 종료하고 SQLite에 저장합니다. 반드시 recording_start와 짝으로 호출해야 합니다.",
-      input_schema: { type: "object", properties: {}, required: [] },
-    },
-  );
+  },
+  {
+    name: "browser_get_page_info",
+    description: "현재 페이지 URL, 제목, 입력 요소/버튼 목록을 반환합니다.",
+    input_schema: { type: "object", properties: {}, required: [] },
+  },
+];
 
-  return tools;
+function buildDbTools(configuredDbs) {
+  if (!configuredDbs.length) return [];
+  return [{
+    name: "db_query",
+    description: `DB에 SELECT 쿼리를 실행합니다. db 파라미터로 접속할 DB를 지정하세요.\n- local: 업무/도메인 데이터 (사용자, 거래, 계정 등)\n- center: 공통/마스터 데이터 (공통코드, 권한, 기준 데이터 등)`,
+    input_schema: {
+      type: "object",
+      properties: {
+        sql:    { type: "string", description: "실행할 SELECT SQL" },
+        params: { type: "array",  items: { type: "string" }, description: "바인딩 파라미터" },
+        db:     { type: "string", enum: configuredDbs, description: `접속할 DB (${configuredDbs.join(" | ")})` },
+      },
+      required: ["sql", "db"],
+    },
+  }];
 }
 
-// ── Tool execution ──────────────────────────────────────────────────────────
+// ── 도구 실행기 ─────────────────────────────────────────────────────────────
 
-// Recording state (independent of ws-handler recording to avoid state collisions)
+async function execGitlab(name, input) {
+  switch (name) {
+    case "gitlab_list_files":  return { files: await gitlab.listFiles(input.path || "", input.ref || "main") };
+    case "gitlab_get_file":    return { content: await gitlab.getFile(input.file_path, input.ref || "main") };
+    case "gitlab_search_code": return { results: await gitlab.searchCode(input.query) };
+    default: return { error: `알 수 없는 GitLab 도구: ${name}` };
+  }
+}
+
+async function execDb(name, input) {
+  if (name !== "db_query") return { error: `알 수 없는 도구: ${name}` };
+  const sql = (input.sql || "").trim();
+  if (!/^select/i.test(sql)) return { error: "SELECT 쿼리만 허용됩니다." };
+  const dbName = input.db || "local";
+  const rows = await db.query(sql, input.params || [], dbName);
+  return { rows, count: rows.length, db: dbName };
+}
+
+// ── 레코딩 상태 ─────────────────────────────────────────────────────────────
+
 let _recStartTime = null;
-let _recEvents = [];
+let _recEvents    = [];
 let _recResponses = [];
-let _recPending = new Set();
-let _recHandler = null;
-let _recName = "";
+let _recPending   = new Set();
+let _recHandler   = null;
+let _recName      = "";
 
 function startRecording(name) {
-  _recName = name;
+  _recName      = name;
   _recStartTime = Date.now();
-  _recEvents = [{ type: "navigate", url: state.currentUrl, t: 0 }];
+  _recEvents    = [{ type: "navigate", url: state.currentUrl, t: 0 }];
   _recResponses = [];
-  _recPending = new Set();
+  _recPending   = new Set();
 
   _recHandler = (response) => {
     const url = response.url();
     if (url.startsWith("data:") || url.startsWith("blob:")) return;
     if (!isApiResponse(response)) return;
     if (isTrackerUrl(url)) return;
-    const ct = (response.headers()["content-type"] || "").toLowerCase();
+    const ct     = (response.headers()["content-type"] || "").toLowerCase();
     const status = response.status();
-    const wantBody = /json|text\/plain|xml/.test(ct);
-    const t = Date.now() - _recStartTime;
-    const purl = pathUrl(url);
-    if (!wantBody) {
+    const t      = Date.now() - _recStartTime;
+    const purl   = pathUrl(url);
+    if (!/json|text\/plain|xml/.test(ct)) {
       _recResponses.push({ url: purl, status, contentType: ct, body: null, t });
       return;
     }
     const p = response
       .buffer()
       .then((buf) => _recResponses.push({ url: purl, status, contentType: ct, body: buf.toString("utf8"), t }))
-      .catch(() => _recResponses.push({ url: purl, status, contentType: ct, body: null, t }))
+      .catch(() =>  _recResponses.push({ url: purl, status, contentType: ct, body: null, t }))
       .finally(() => _recPending.delete(p));
     _recPending.add(p);
   };
@@ -225,22 +257,14 @@ async function stopRecording() {
   if (!_recHandler) return null;
   state.activePage.off("response", _recHandler);
   _recHandler = null;
-
   if (_recPending.size > 0)
     await Promise.race([Promise.allSettled([..._recPending]), sleep(2000)]);
-
-  if (_recEvents.length <= 1) return null; // navigate만 있으면 저장하지 않음
-
+  if (_recEvents.length <= 1) return null;
   const eventsWithMap = mapResponsesToEvents([..._recEvents], [..._recResponses]);
   const id = dbSaveRecording(
-    _recName,
-    state.currentUrl,
-    _recEvents.length,
-    new Date().toISOString(),
-    eventsWithMap,
-    [..._recResponses],
-    [...state.sessionCookies],
-    [],
+    _recName, state.currentUrl, _recEvents.length,
+    new Date().toISOString(), eventsWithMap, [..._recResponses],
+    [...state.sessionCookies], [],
   );
   dbUpdateName(id, _recName);
   return id;
@@ -251,298 +275,567 @@ function addRecordedEvent(ev) {
   _recEvents.push({ ...ev, t: Date.now() - _recStartTime });
 }
 
-async function executeTool(name, input) {
+async function execBrowser(name, input) {
   const page = state.activePage;
   if (!page) return { error: "브라우저 세션이 없습니다." };
 
-  try {
-    switch (name) {
-      // ── GitLab ──
-      case "gitlab_list_files":
-        return { files: await gitlab.listFiles(input.path || "", input.ref || "main") };
-      case "gitlab_get_file":
-        return { content: await gitlab.getFile(input.file_path, input.ref || "main") };
-      case "gitlab_search_code":
-        return { results: await gitlab.searchCode(input.query) };
-
-      // ── DB ──
-      case "db_query": {
-        const sql = (input.sql || "").trim();
-        if (!/^select/i.test(sql)) return { error: "SELECT 쿼리만 허용됩니다." };
-        const dbName = input.db || "local";
-        const rows = await db.query(sql, input.params || [], dbName);
-        return { rows, count: rows.length, db: dbName };
-      }
-
-      // ── Browser ──
-      case "browser_screenshot": {
-        const buf = await page.screenshot({ type: "jpeg", quality: 75 });
-        return { image: buf.toString("base64"), mimeType: "image/jpeg" };
-      }
-      case "browser_navigate": {
-        if (state.sessionCookies.length > 0)
-          await page.setCookie(...state.sessionCookies);
-        await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await waitIdle(8000, 500);
-        if (_recHandler) addRecordedEvent({ type: "navigate", url: input.url });
-        return { url: page.url() };
-      }
-      case "browser_click": {
-        let clicked = false;
-        if (input.selector) {
-          try {
-            const handles = await page.$$(input.selector);
-            let el = handles[0];
-            if (handles.length > 1 && input.label) {
-              for (const h of handles) {
-                const txt = await h.evaluate((e) => (e.innerText || e.textContent || "").trim());
-                if (txt === input.label) { el = h; break; }
-              }
+  switch (name) {
+    case "browser_screenshot": {
+      const buf = await page.screenshot({ type: "jpeg", quality: 75 });
+      return { image: buf.toString("base64"), mimeType: "image/jpeg" };
+    }
+    case "browser_navigate": {
+      if (state.sessionCookies.length > 0) await page.setCookie(...state.sessionCookies);
+      await page.goto(input.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await waitIdle(8000, 500);
+      if (_recHandler) addRecordedEvent({ type: "navigate", url: input.url });
+      return { url: page.url() };
+    }
+    case "browser_click": {
+      let clicked = false;
+      if (input.selector) {
+        try {
+          const handles = await page.$$(input.selector);
+          let el = handles[0];
+          if (handles.length > 1 && input.label) {
+            for (const h of handles) {
+              const txt = await h.evaluate((e) => (e.innerText || e.textContent || "").trim());
+              if (txt === input.label) { el = h; break; }
             }
-            if (el) { await el.click(); clicked = true; }
-          } catch {}
-        }
-        if (!clicked && typeof input.x === "number") {
-          await page.mouse.click(input.x, input.y);
-          clicked = true;
-        }
-        if (clicked) {
-          await waitIdle(6000, 500);
-          if (_recHandler) addRecordedEvent({ type: "click", selector: input.selector, label: input.label, x: input.x, y: input.y });
-        }
-        return { clicked };
+          }
+          if (el) { await el.click(); clicked = true; }
+        } catch {}
       }
-      case "browser_type": {
-        if (input.selector) {
-          try {
-            const el = await page.$(input.selector);
-            if (el) {
-              await el.click({ clickCount: 3 });
-              await el.type(input.text || "");
-              if (_recHandler) addRecordedEvent({ type: "input", selector: input.selector, value: input.text });
-              return { typed: true };
-            }
-          } catch {}
-        }
-        await page.keyboard.type(input.text || "");
-        if (_recHandler) addRecordedEvent({ type: "input", selector: input.selector, value: input.text });
-        return { typed: true };
+      if (!clicked && typeof input.x === "number") {
+        await page.mouse.click(input.x, input.y);
+        clicked = true;
       }
-      case "browser_key_press": {
-        const key = input.key === " " ? "Space" : input.key;
-        if (!SKIP_KEYS.has(key)) {
-          try { await page.keyboard.press(key); } catch {}
-          await waitIdle(6000, 500);
-          if (_recHandler) addRecordedEvent({ type: "keydown", key: input.key });
-        }
-        return { key: input.key };
+      if (clicked) {
+        await waitIdle(6000, 500);
+        if (_recHandler) addRecordedEvent({ type: "click", selector: input.selector, label: input.label, x: input.x, y: input.y });
       }
-      case "browser_scroll": {
-        await page.evaluate((x, y) => window.scrollTo(x, y), input.x, input.y);
-        if (_recHandler) addRecordedEvent({ type: "scroll", scrollX: input.x, scrollY: input.y });
-        return { scrolled: true };
+      return { clicked };
+    }
+    case "browser_type": {
+      if (input.selector) {
+        try {
+          const el = await page.$(input.selector);
+          if (el) {
+            await el.click({ clickCount: 3 });
+            await el.type(input.text || "");
+            if (_recHandler) addRecordedEvent({ type: "input", selector: input.selector, value: input.text });
+            return { typed: true };
+          }
+        } catch {}
       }
-      case "browser_get_page_info": {
-        const info = await page.evaluate(() => {
-          const inputs = Array.from(document.querySelectorAll("input, textarea, select, button")).slice(0, 30).map((el) => ({
-            tag: el.tagName.toLowerCase(),
-            type: el.type || null,
-            id: el.id || null,
-            name: el.name || null,
+      await page.keyboard.type(input.text || "");
+      if (_recHandler) addRecordedEvent({ type: "input", selector: input.selector, value: input.text });
+      return { typed: true };
+    }
+    case "browser_key_press": {
+      const key = input.key === " " ? "Space" : input.key;
+      if (!SKIP_KEYS.has(key)) {
+        try { await page.keyboard.press(key); } catch {}
+        await waitIdle(6000, 500);
+        if (_recHandler) addRecordedEvent({ type: "keydown", key: input.key });
+      }
+      return { key: input.key };
+    }
+    case "browser_scroll": {
+      await page.evaluate((x, y) => window.scrollTo(x, y), input.x, input.y);
+      if (_recHandler) addRecordedEvent({ type: "scroll", scrollX: input.x, scrollY: input.y });
+      return { scrolled: true };
+    }
+    case "browser_get_page_info": {
+      return page.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll("input,textarea,select,button"))
+          .slice(0, 40).map((el) => ({
+            tag: el.tagName.toLowerCase(), type: el.type || null,
+            id: el.id || null, name: el.name || null,
             placeholder: el.placeholder || null,
             text: (el.innerText || el.textContent || "").trim().slice(0, 80),
             visible: el.getBoundingClientRect().width > 0,
           }));
-          return { url: location.href, title: document.title, inputs };
-        });
-        return info;
-      }
-
-      // ── Recording ──
-      case "recording_start": {
-        if (_recHandler) await stopRecording(); // 이전 레코딩이 끊기지 않았으면 정리
-        startRecording(input.name || "분석 테스트");
-        log("info", `[분석] 레코딩 시작: ${input.name}`);
-        send({ type: "analyze-recording", name: input.name });
-        return { started: true, name: input.name };
-      }
-      case "recording_stop": {
-        const id = await stopRecording();
-        if (id) {
-          log("success", `[분석] 레코딩 저장 → id=${id}, 케이스: ${_recName}`);
-          send({ type: "recordings", list: dbAllMeta() });
-          return { saved: true, id, name: _recName };
-        }
-        return { saved: false, reason: "이벤트 없음" };
-      }
-
-      default:
-        return { error: `알 수 없는 도구: ${name}` };
+        return { url: location.href, title: document.title, inputs };
+      });
     }
-  } catch (err) {
-    return { error: err.message };
+    default: return { error: `알 수 없는 브라우저 도구: ${name}` };
   }
 }
 
-// ── Main agent loop ─────────────────────────────────────────────────────────
+// ── 공통 에이전트 러너 ──────────────────────────────────────────────────────
+
+function agentMsg(agent, label, status, message) {
+  send({ type: "analyze-agent", agent, label, status, message });
+  const lvl = status === "error" ? "fail" : status === "done" ? "success" : "info";
+  log(lvl, `[${label}] ${message.slice(0, 200)}`);
+}
+
+function phaseMsg(phase, total, label) {
+  send({ type: "analyze-phase", phase, total, label });
+  log("info", `━━ Phase ${phase}/${total}: ${label} ━━`);
+}
+
+function findingMsg(agent, label, findingType, title, description) {
+  send({ type: "analyze-finding", agent, label, findingType, title, description: description || "" });
+  log("info", `[${label}] 📌 ${title}`);
+}
+
+// 에이전트가 발견한 findings를 누적하는 공유 저장소 (Lead Agent에게 전달)
+let _sharedFindings = [];
+
+function resetFindings() { _sharedFindings = []; }
+
+/**
+ * 범용 에이전트 루프
+ * - send_finding: 중간 발견 즉시 전달 (웹소켓 + _sharedFindings)
+ * - report_findings: 최종 결과 제출 후 루프 종료
+ */
+async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurns = 40, execTool }) {
+  agentMsg(name, label, "start", "시작");
+  const messages = [{ role: "user", content: userMessage }];
+
+  for (let turn = 0; turn < maxTurns; turn++) {
+    if (state.analysisCancelled) throw new Error("분석 취소됨");
+
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4096,
+      system: systemPrompt,
+      tools,
+      messages,
+    });
+    messages.push({ role: "assistant", content: response.content });
+
+    if (response.stop_reason === "end_turn" || !response.content.some((b) => b.type === "tool_use")) break;
+
+    const toolResults = [];
+    for (const block of response.content) {
+      if (block.type !== "tool_use") continue;
+      if (state.analysisCancelled) throw new Error("분석 취소됨");
+
+      // ── send_finding: 즉시 전달 후 계속 ──
+      if (block.name === "send_finding") {
+        const { findingType, title, description, data } = block.input;
+        findingMsg(name, label, findingType, title, description);
+        _sharedFindings.push({ agent: name, label, findingType, title, description, data, ts: Date.now() });
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "finding received by lead agent" }] });
+        continue;
+      }
+
+      // ── report_findings: 최종 제출 후 루프 종료 ──
+      if (block.name === "report_findings") {
+        agentMsg(name, label, "done", `분석 완료`);
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "findings submitted" }] });
+        messages.push({ role: "user", content: toolResults });
+        return block.input.findings || {};
+      }
+
+      // ── 일반 도구 실행 ──
+      agentMsg(name, label, "progress", block.name);
+      let result;
+      try {
+        result = execTool ? await execTool(block.name, block.input) : { error: "도구 없음" };
+      } catch (err) {
+        result = { error: err.message };
+      }
+
+      let content;
+      if (block.name === "browser_screenshot" && result.image) {
+        content = [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: result.image } }];
+      } else {
+        content = [{ type: "text", text: JSON.stringify(result).slice(0, 10000) }];
+      }
+      toolResults.push({ type: "tool_result", tool_use_id: block.id, content });
+    }
+    messages.push({ role: "user", content: toolResults });
+  }
+
+  agentMsg(name, label, "done", "완료");
+  return {};
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 에이전트 팀
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── 1. UI 에이전트 ───────────────────────────────────────────────────────────
+async function runUIAgent(url, pageSource) {
+  return runAgent({
+    name: "ui", label: "UI 분석",
+    tools: [
+      {
+        name: "browser_get_page_info",
+        description: "현재 페이지의 입력 요소, 버튼, URL, 제목을 반환합니다.",
+        input_schema: { type: "object", properties: {}, required: [] },
+      },
+      {
+        name: "browser_screenshot",
+        description: "현재 화면 스크린샷",
+        input_schema: { type: "object", properties: {}, required: [] },
+      },
+      SEND_FINDING_TOOL,
+      REPORT_TOOL,
+    ],
+    systemPrompt: `당신은 웹 UI 분석 에이전트입니다.
+현재 페이지의 UI 구조를 분석하여 비즈니스 로직을 파악합니다.
+
+분석 방법:
+1. browser_get_page_info로 입력 요소/버튼 목록 수집
+2. browser_screenshot으로 화면 확인
+3. 발견사항마다 send_finding 호출 (폼 필드, 버튼 역할, 화면 목적 등)
+4. 분석 완료 후 report_findings 호출
+
+report_findings 포함 내용:
+- pageTitle: 페이지 제목
+- purpose: 이 페이지의 역할 (1-2문장)
+- formFields: [{id, name, type, label, placeholder, required}]
+- buttons: [{label, type, role}]
+- sections: 주요 화면 섹션 목록
+- userActions: 사용자가 할 수 있는 주요 액션 목록`,
+    userMessage: `현재 URL: ${url}
+
+현재 페이지 HTML (일부):
+\`\`\`html
+${pageSource.slice(0, 6000)}
+\`\`\`
+
+UI를 분석하여 발견사항을 send_finding으로 전달하고, 완료 후 report_findings를 호출하세요.`,
+    execTool: async (name, input) => {
+      if (name === "browser_get_page_info") {
+        return state.activePage.evaluate(() => {
+          const inputs = Array.from(document.querySelectorAll("input,textarea,select,button"))
+            .slice(0, 40).map((el) => ({
+              tag: el.tagName.toLowerCase(), type: el.type || null,
+              id: el.id || null, name: el.name || null,
+              placeholder: el.placeholder || null,
+              text: (el.innerText || el.textContent || "").trim().slice(0, 80),
+              visible: el.getBoundingClientRect().width > 0,
+            }));
+          return { url: location.href, title: document.title, inputs };
+        });
+      }
+      return execBrowser(name, input);
+    },
+  });
+}
+
+// ── 2. Frontend 에이전트 ──────────────────────────────────────────────────────
+async function runFrontendAgent(url) {
+  if (!gitlab.isConfigured()) {
+    agentMsg("frontend", "Frontend 분석", "done", "GitLab 미설정 — 스킵");
+    return { skipped: true, apiEndpoints: [], validationRules: [] };
+  }
+  const urlPath = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+
+  return runAgent({
+    name: "frontend", label: "Frontend 분석",
+    tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    systemPrompt: `당신은 Vue.js 프론트엔드 소스 분석 에이전트입니다.
+현재 URL 경로에 해당하는 Vue 컴포넌트를 추적하여 UI→API까지 분석합니다.
+
+분석 순서:
+1. gitlab_list_files("") → 프로젝트 루트 구조 파악
+2. gitlab_search_code로 Vue Router에서 현재 경로("${urlPath}") 검색
+3. 매핑된 Vue 컴포넌트 파일 읽기 (gitlab_get_file)
+4. 컴포넌트의 import 문 추적:
+   - 하위 컴포넌트 (src/components/ 등)
+   - Composables / hooks (src/composables/)
+   - API 클라이언트 파일 (src/api/, src/services/)
+5. API 클라이언트에서 엔드포인트 경로 추출
+
+비즈니스 로직 발견 시 즉시 send_finding 호출:
+- API 엔드포인트 발견 → findingType: "api_endpoint"
+- 유효성 검증 규칙 발견 → findingType: "validation_rule"
+- 비즈니스 로직 발견 → findingType: "business_logic"
+
+report_findings 포함:
+- routerFile, componentFile: 파일 경로
+- componentFiles: 읽은 모든 파일 목록
+- apiEndpoints: [{method, path, description, requestParams, responseFields}]
+- validationRules: [{field, rule, message}]
+- formFields: [{name, type, required, validations}]
+- businessLogic: 발견된 비즈니스 로직 설명 목록`,
+    userMessage: `현재 페이지 URL: ${url} (경로: ${urlPath})
+
+Vue Router에서 이 경로의 컴포넌트를 찾아 UI→API까지 추적하고,
+발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`,
+    execTool: execGitlab,
+  });
+}
+
+// ── 3. Backend 에이전트 ───────────────────────────────────────────────────────
+async function runBackendAgent(frontendFindings) {
+  if (!gitlab.isConfigured()) {
+    agentMsg("backend", "Backend 분석", "done", "GitLab 미설정 — 스킵");
+    return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
+  }
+  const endpoints = frontendFindings.apiEndpoints || [];
+  if (!endpoints.length) {
+    agentMsg("backend", "Backend 분석", "done", "API 엔드포인트 없음 — 스킵");
+    return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
+  }
+
+  return runAgent({
+    name: "backend", label: "Backend 분석",
+    tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    systemPrompt: `당신은 백엔드 소스 분석 에이전트입니다.
+프론트엔드 에이전트가 발견한 API 엔드포인트를 바탕으로 백엔드 컨트롤러/서비스를 분석합니다.
+
+분석 순서:
+1. 각 API 경로로 gitlab_search_code 검색
+   - Spring: "@GetMapping", "@PostMapping" 등
+   - Express/Koa: "router.get(", "router.post(" 등
+2. 컨트롤러 파일 읽기
+3. 서비스/레포지터리/매퍼 파일 읽기
+4. DB 쿼리, 테이블명, 비즈니스 조건 파악
+
+발견 시 즉시 send_finding 호출:
+- DB 테이블 → findingType: "db_table"
+- 권한/인증 규칙 → findingType: "auth_rule"
+- 에러 시나리오 → findingType: "error_scenario"
+- 비즈니스 로직 → findingType: "business_logic"
+
+report_findings 포함:
+- controllerFiles: 읽은 컨트롤러 파일 목록
+- businessLogic: [{endpoint, description, conditions, errors}]
+- dbTables: [{name, keyColumns, purpose}]
+- authRules: 권한/인증 조건 목록
+- errorScenarios: [{condition, errorMessage, httpStatus}]
+- testScenarios: [{name, description, requiredData, expectedResult}]`,
+    userMessage: `Frontend 분석 결과 (API 엔드포인트):
+\`\`\`json
+${JSON.stringify({ apiEndpoints: endpoints, validationRules: frontendFindings.validationRules || [] }, null, 2).slice(0, 4000)}
+\`\`\`
+
+각 엔드포인트의 백엔드 컨트롤러/서비스를 찾아 분석하고,
+발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`,
+    execTool: execGitlab,
+  });
+}
+
+// ── 4. DB 에이전트 ────────────────────────────────────────────────────────────
+async function runDBAgent(frontendFindings, backendFindings) {
+  const configuredDbs = db.configuredDbs();
+  if (!configuredDbs.length) {
+    agentMsg("db", "DB 분석", "done", "DB 미설정 — 스킵");
+    return { skipped: true, testData: {}, validIds: {} };
+  }
+
+  const dbTables = backendFindings.dbTables || [];
+  const entityHints = (frontendFindings.apiEndpoints || []).map((e) => e.path).join(", ");
+
+  return runAgent({
+    name: "db", label: "DB 분석",
+    tools: [...buildDbTools(configuredDbs), SEND_FINDING_TOOL, REPORT_TOOL],
+    systemPrompt: `당신은 DB 데이터 분석 에이전트입니다.
+테스트에 사용할 실제 데이터를 DB에서 조회합니다.
+
+DB 용도:
+- center DB: 공통코드, 권한, 마스터 데이터 (조직코드, 분류코드 등)
+- local DB: 업무/도메인 데이터 (사용자, 계정, 거래, 업무 데이터 등)
+
+조회 전략:
+1. 백엔드에서 사용하는 테이블에서 샘플 데이터 SELECT (LIMIT 5)
+2. 테스트에 필요한 유효한 ID/코드값 확보
+3. 경계값 데이터 확인 (빈 결과, 최대값 등)
+4. 설정된 DB가 여러 개면 모두 조회
+
+데이터 발견 시 send_finding 호출 (findingType: "db_table")
+
+report_findings 포함:
+- testData: {[테이블명]: [샘플 rows]}
+- validIds: {[용도]: 값} (예: {"userId": 123, "deptCode": "A01"})
+- summary: 확보한 테스트 데이터 요약`,
+    userMessage: `Backend 분석 결과 (사용 테이블):
+\`\`\`json
+${JSON.stringify(dbTables, null, 2).slice(0, 3000)}
+\`\`\`
+
+API 경로 힌트: ${entityHints}
+설정된 DB: ${configuredDbs.join(", ")}
+
+테스트 데이터를 조회하고 report_findings를 호출하세요.`,
+    execTool: execDb,
+  });
+}
+
+// ── 5. Lead 에이전트 — 취합 및 테스트케이스 도출 ─────────────────────────────
+async function runLeadAgent(url, uiF, frontendF, backendF, dbF) {
+  agentMsg("lead", "리드 에이전트", "start", "전체 분석 결과 취합 중");
+
+  const findingsSummary = _sharedFindings
+    .map((f) => `[${f.label}] ${f.findingType}: ${f.title}${f.description ? " — " + f.description : ""}`)
+    .join("\n");
+
+  const response = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 8096,
+    system: `당신은 QA 리드 에이전트입니다.
+여러 분석 에이전트의 결과를 종합하여 실행 가능한 테스트 케이스 목록을 도출합니다.
+
+각 테스트 케이스:
+- name: "[화면명] - [시나리오]" 형식
+- steps: 순서대로 수행할 액션 배열
+  각 step 형식: { "action": "navigate|click|type|key|scroll|screenshot", "selector"?: "...", "text"?: "...", "url"?: "...", "key"?: "...", "x"?: 0, "y"?: 0 }
+- testData: 실제 값 (DB에서 확보한 ID, 코드값 등)
+- expectedResult: 예상 결과
+
+포함할 케이스 유형:
+1. 정상 경로 (Happy path) — 유효 데이터로 성공
+2. 유효성 오류 — 필수값 누락, 형식 오류
+3. 권한/인증 경계 — 미인증, 권한 없음 (해당하는 경우)
+4. 경계값 — 빈 목록, 최대값
+
+중요: 응답은 반드시 아래 JSON 형식만 출력하세요 (다른 텍스트 없음):
+{"testCases":[{"name":"...","steps":[{"action":"navigate","url":"..."}],"testData":{},"expectedResult":"..."}]}`,
+    messages: [{
+      role: "user",
+      content: `분석 URL: ${url}
+
+## 에이전트 발견 목록 (실시간 전달된 내용)
+${findingsSummary || "(없음)"}
+
+## UI 분석 결과
+\`\`\`json
+${JSON.stringify(uiF, null, 2).slice(0, 2500)}
+\`\`\`
+
+## Frontend 분석 결과
+\`\`\`json
+${JSON.stringify(frontendF, null, 2).slice(0, 2500)}
+\`\`\`
+
+## Backend 분석 결과
+\`\`\`json
+${JSON.stringify(backendF, null, 2).slice(0, 2500)}
+\`\`\`
+
+## DB 데이터
+\`\`\`json
+${JSON.stringify(dbF, null, 2).slice(0, 2500)}
+\`\`\`
+
+위 모든 결과를 종합하여 테스트 케이스 JSON을 반환하세요.`,
+    }],
+  });
+
+  const text = response.content.find((b) => b.type === "text")?.text || "{}";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  let testCases = [];
+  if (jsonMatch) {
+    try { testCases = JSON.parse(jsonMatch[0]).testCases || []; } catch {}
+  }
+
+  agentMsg("lead", "리드 에이전트", "done", `테스트 케이스 ${testCases.length}개 도출 완료`);
+  send({ type: "analyze-synthesis", testCases: testCases.map((tc) => ({ name: tc.name, expectedResult: tc.expectedResult })) });
+  return testCases;
+}
+
+// ── 6. Recording 에이전트 ─────────────────────────────────────────────────────
+async function runRecordingAgent(tc, index, total) {
+  send({ type: "analyze-recording", name: tc.name, index: index + 1, total });
+  agentMsg("recording", `레코딩 ${index + 1}/${total}`, "start", tc.name);
+  startRecording(tc.name);
+
+  await runAgent({
+    name: "recording",
+    label: `레코딩 ${index + 1}/${total}`,
+    tools: [...BROWSER_TOOLS, REPORT_TOOL],
+    systemPrompt: `당신은 테스트 케이스를 브라우저에서 직접 실행하는 레코딩 에이전트입니다.
+주어진 단계를 순서대로 실행하세요.
+각 주요 액션 전후에 browser_screenshot으로 진행 상황을 확인하세요.
+완료되면 report_findings({ "completed": true, "summary": "간략 결과" })를 호출하세요.`,
+    userMessage: `테스트 케이스 [${index + 1}/${total}]: ${tc.name}
+
+예상 결과: ${tc.expectedResult || ""}
+
+실행 단계:
+${JSON.stringify(tc.steps, null, 2)}
+
+사용할 테스트 데이터:
+${JSON.stringify(tc.testData || {}, null, 2)}
+
+단계를 순서대로 실행하세요.`,
+    execTool: execBrowser,
+    maxTurns: 30,
+  });
+
+  const id = await stopRecording();
+  if (id) {
+    log("success", `[레코딩] 저장: ${tc.name} (id=${id})`);
+    send({ type: "recordings", list: dbAllMeta() });
+    agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", `저장 완료 (id=${id})`);
+    return id;
+  }
+  log("warn", `[레코딩] 이벤트 없음 — 미저장: ${tc.name}`);
+  agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", "이벤트 없음 (미저장)");
+  return null;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 메인 오케스트레이터
+// ════════════════════════════════════════════════════════════════════════════
 
 async function runAnalysis(url) {
   if (state.isAnalyzing) {
     send({ type: "analyze-error", message: "이미 분석이 진행 중입니다." });
     return;
   }
-
   if (!process.env.ANTHROPIC_API_KEY) {
     send({ type: "analyze-error", message: "ANTHROPIC_API_KEY가 설정되지 않았습니다." });
     return;
   }
 
-  state.isAnalyzing = true;
+  state.isAnalyzing      = true;
   state.analysisCancelled = false;
-  let createdCount = 0;
+  resetFindings();
 
+  let createdCount = 0;
   send({ type: "analyze-started", url });
   log("info", `━━ 분석 시작: ${url} ━━`);
 
   try {
-    // 현재 페이지 DOM 요약 (프롬프트 컨텍스트)
+    // 현재 페이지 DOM 수집
     let pageSource = "";
-    try {
-      pageSource = await state.activePage.evaluate(() => {
-        // body 텍스트 + 주요 attributes 요약 (너무 크면 잘라냄)
-        return document.documentElement.outerHTML.slice(0, 8000);
-      });
-    } catch {}
+    try { pageSource = await state.activePage.evaluate(() => document.documentElement.outerHTML); } catch {}
 
-    const systemPrompt = `당신은 웹 애플리케이션 QA 엔지니어입니다.
-주어진 URL의 페이지를 UI부터 백엔드까지 전체 스택을 분석하여 테스트 케이스를 도출하고 직접 레코딩합니다.
+    // ── Phase 1: UI + Frontend 병렬 분석 ─────────────────────────────────
+    phaseMsg(1, 4, "UI + Frontend 소스 분석 (병렬)");
+    const [uiFindings, frontendFindings] = await Promise.all([
+      runUIAgent(url, pageSource)
+        .catch((e) => { agentMsg("ui",       "UI 분석",       "error", e.message); return {}; }),
+      runFrontendAgent(url)
+        .catch((e) => { agentMsg("frontend", "Frontend 분석", "error", e.message); return {}; }),
+    ]);
 
-## 분석 단계 (순서대로 수행)
+    if (state.analysisCancelled) throw new Error("취소됨");
 
-### Phase 1: 라우터 → Vue 컴포넌트 탐색 (GitLab 도구가 있을 때)
-1. gitlab_list_files("") 로 프로젝트 루트 구조 파악
-2. gitlab_search_code 로 현재 URL 경로에 해당하는 Vue Router 설정 검색
-   예: URL이 "/login" 이면 "path: '/login'" 또는 "'/login'" 검색
-3. 라우터에서 매핑된 Vue 컴포넌트 파일 경로 확인
-4. gitlab_get_file 로 해당 컴포넌트 파일 읽기
+    // ── Phase 2: Backend 분석 (Frontend 결과 활용) ───────────────────────
+    phaseMsg(2, 4, "Backend 소스 분석");
+    const backendFindings = await runBackendAgent(frontendFindings)
+      .catch((e) => { agentMsg("backend", "Backend 분석", "error", e.message); return {}; });
 
-### Phase 2: Vue 컴포넌트 → 하위 컴포넌트 / API 클라이언트 탐색
-1. 컴포넌트 import 문에서 하위 컴포넌트, composable, API 클라이언트(src/api/ 등) 파악
-2. 각 참조 파일을 gitlab_get_file 로 추가 읽기
-3. 수집 정보:
-   - 폼 필드 목록 (v-model, :value 바인딩)
-   - 유효성 검증 규칙 (required, pattern, min/max 등)
-   - 이벤트 핸들러 및 API 호출 함수
-   - API 엔드포인트 경로 (예: '/api/v1/users', '/api/auth/login')
+    if (state.analysisCancelled) throw new Error("취소됨");
 
-### Phase 3: API 클라이언트 → 백엔드 컨트롤러 / 서비스 탐색
-1. API 클라이언트 파일에서 엔드포인트 경로 추출
-2. gitlab_search_code 로 해당 경로를 처리하는 백엔드 컨트롤러 검색
-   예: "@GetMapping(\"/users\")" 또는 "router.get('/users'" 검색
-3. 컨트롤러 파일 읽기 → 서비스 파일로 이동
-4. 수집 정보:
-   - 비즈니스 로직 분기 조건
-   - 권한/인증 검사 (예: @PreAuthorize, middleware)
-   - DB 쿼리에서 사용하는 테이블/컬럼 파악
+    // ── Phase 3: DB 분석 (Backend 결과 활용) ────────────────────────────
+    phaseMsg(3, 4, "DB 데이터 분석");
+    const dbFindings = await runDBAgent(frontendFindings, backendFindings)
+      .catch((e) => { agentMsg("db", "DB 분석", "error", e.message); return {}; });
 
-### Phase 4: DB 데이터 조회 (DB 도구가 있을 때)
-- center DB: 공통/마스터 데이터 조회 (공통코드, 권한, 기준 데이터 등)
-- local DB: 도메인/업무 데이터 조회 (사용자, 계정, 거래 데이터 등)
-- 각 DB에서 테스트에 필요한 실제 ID, 코드값, 조건값 획득
-- 두 DB 모두 설정된 경우 두 곳 모두 조회
+    if (state.analysisCancelled) throw new Error("취소됨");
 
-### Phase 5: 테스트 케이스 계획 및 레코딩
-소스 분석 결과를 바탕으로 아래 유형의 케이스 계획:
-- 정상 경로 (Happy path): 유효한 데이터로 성공 시나리오
-- 유효성 검증 오류: 필수값 누락, 형식 오류, 범위 초과
-- 권한/인증 경계: 미인증 접근, 권한 없는 작업
-- 경계값: 빈 목록, 최대값, 특수문자
+    // ── Phase 4: Lead 에이전트 취합 + 레코딩 ────────────────────────────
+    phaseMsg(4, 4, "테스트 케이스 도출 및 레코딩");
+    const testCases = await runLeadAgent(url, uiFindings, frontendFindings, backendFindings, dbFindings);
 
-각 케이스 레코딩 순서:
-a. recording_start("케이스명")  ← 반드시 호출
-b. browser_navigate(url)
-c. browser_screenshot → 화면 확인
-d. browser_click / browser_type / browser_key_press 등으로 시나리오 수행
-e. recording_stop()  ← 반드시 호출
-
-## 케이스 이름 규칙
-"[화면명] - [시나리오]"
-예: "로그인 - 정상", "로그인 - 비밀번호 오류", "사용자 목록 - 검색"
-
-## 대체 전략
-- GitLab 도구 없음: browser_get_page_info + browser_screenshot 으로 DOM 기반 분석
-- DB 도구 없음: 고정 테스트 데이터로 시나리오 구성
-
-## 주의사항
-- recording_start와 recording_stop은 반드시 짝으로 호출 (짝이 맞지 않으면 저장 안 됨)
-- 한 케이스 recording_stop 후 즉시 다음 케이스 시작
-- 분석 완료 후 도구 호출 없이 완료 메시지만 반환`;
-
-    const userMessage = `현재 URL: ${url}
-
-현재 페이지 HTML (일부):
-\`\`\`html
-${pageSource}
-\`\`\`
-
-위 페이지를 분석하고 테스트 케이스를 레코딩해주세요.`;
-
-    const client = new Anthropic();
-    const tools = buildTools();
-    const messages = [{ role: "user", content: userMessage }];
-
-    let step = 0;
-    const MAX_TURNS = 80; // 무한루프 방지
-
-    while (step < MAX_TURNS) {
-      if (state.analysisCancelled) {
-        log("warn", "[분석] 취소됨");
-        break;
-      }
-
-      step++;
-      send({ type: "analyze-progress", step, message: `에이전트 루프 ${step}번째` });
-
-      const response = await client.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 4096,
-        system: systemPrompt,
-        tools,
-        messages,
-      });
-
-      messages.push({ role: "assistant", content: response.content });
-
-      // 종료 조건: end_turn 또는 tool_use 없음
-      if (response.stop_reason === "end_turn") break;
-      if (!response.content.some((b) => b.type === "tool_use")) break;
-
-      // 도구 실행
-      const toolResults = [];
-      for (const block of response.content) {
-        if (block.type !== "tool_use") continue;
-        if (state.analysisCancelled) break;
-
-        log("info", `[분석] 도구 호출: ${block.name} ${JSON.stringify(block.input).slice(0, 120)}`);
-        const result = await executeTool(block.name, block.input);
-
-        if (block.name === "recording_stop" && result.saved) createdCount++;
-
-        // 스크린샷은 image 블록으로 전달
-        let content;
-        if (block.name === "browser_screenshot" && result.image) {
-          content = [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: result.image } }];
-        } else {
-          content = [{ type: "text", text: JSON.stringify(result) }];
-        }
-
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content });
-      }
-
-      messages.push({ role: "user", content: toolResults });
+    for (let i = 0; i < testCases.length; i++) {
+      if (state.analysisCancelled) break;
+      const id = await runRecordingAgent(testCases[i], i, testCases.length)
+        .catch((e) => { agentMsg("recording", `레코딩 ${i + 1}`, "error", e.message); return null; });
+      if (id) createdCount++;
     }
 
-    // 레코딩 중인 게 있으면 강제 종료
     if (_recHandler) {
       const id = await stopRecording();
       if (id) { createdCount++; send({ type: "recordings", list: dbAllMeta() }); }

@@ -87,6 +87,39 @@
             <span id="ov-progress" class="ov-strip-progress">준비 중…</span>
             <button class="ov-cancel" id="ov-cancel">취소</button>
           </div>
+          <!-- ── 분석 에이전트 상태 패널 (분석 중에만 표시) ── -->
+          <div id="ov-agents" class="ov-agents hidden">
+            <div class="ov-agent-row" data-agent="ui">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">UI 분석</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+            <div class="ov-agent-row" data-agent="frontend">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">Frontend 분석</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+            <div class="ov-agent-row" data-agent="backend">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">Backend 분석</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+            <div class="ov-agent-row" data-agent="db">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">DB 분석</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+            <div class="ov-agent-row" data-agent="lead">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">리드 에이전트</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+            <div class="ov-agent-row" data-agent="recording">
+              <span class="ov-agent-icon pending">○</span>
+              <span class="ov-agent-name">레코딩</span>
+              <span class="ov-agent-msg">대기 중</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

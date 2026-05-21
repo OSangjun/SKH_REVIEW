@@ -59,6 +59,7 @@
   const ovSuiteInfo   = document.getElementById('ov-suite-info');
   const ovSuiteResult = document.getElementById('ov-suite-result');
   const analyzeBtn    = document.getElementById('analyze-btn');
+  const ovAgents      = document.getElementById('ov-agents');
   const suiteBtn      = document.getElementById('suite-btn');
   const urlTreeBtn    = document.getElementById('url-tree-btn');
   const urlTreePopup  = document.getElementById('url-tree-popup');
@@ -340,18 +341,59 @@
         replayBtn.disabled  = true;
         recordBtn.disabled  = true;
         ovTitle.innerHTML   = `${ICON('zap')} 분석 중`;
+        overlay.classList.add('analyzing');
         showOverlay(msg.url || currentPageUrl, 0, 0);
+        resetAgentPanel();
+        ovAgents.classList.remove('hidden');
         setStatus(`분석 시작: ${msg.url || currentPageUrl}`);
         document.getElementById('statusbar')?.classList.add('replaying');
         break;
 
-      case 'analyze-progress':
-        setStatus(`분석 진행 중 (단계 ${msg.step}): ${msg.message || ''}`);
+      case 'analyze-phase': {
+        const pct = msg.total > 0 ? Math.round(((msg.phase - 1) / msg.total) * 100) : 0;
+        ovBar.style.width      = `${pct}%`;
+        ovName.textContent     = msg.label || '';
+        ovProgress.textContent = `Phase ${msg.phase}/${msg.total}`;
+        setStatus(`분석 Phase ${msg.phase}/${msg.total}: ${msg.label}`);
+        break;
+      }
+
+      case 'analyze-agent':
+        updateAgentRow(msg.agent, msg.status, msg.message || '');
+        if (msg.status === 'progress') {
+          appendLog('info', null, `[${msg.label}] ${msg.message}`);
+        }
         break;
 
+      case 'analyze-finding': {
+        const el = document.createElement('div');
+        el.className = 'log-line finding';
+        el.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString('ko',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>` +
+          `<span class="log-src">${esc(msg.label || '')}</span>` +
+          `<span class="log-msg">${esc(msg.title || '')}${msg.description ? ' — ' + esc(msg.description) : ''}</span>`;
+        logLines.appendChild(el);
+        logLines.scrollTop = logLines.scrollHeight;
+        break;
+      }
+
+      case 'analyze-synthesis': {
+        const names = (msg.testCases || []).map((tc, i) => `  ${i + 1}. ${tc.name}`).join('\n');
+        const el = document.createElement('div');
+        el.className = 'log-line synthesis';
+        el.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString('ko',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>` +
+          `<span class="log-src">리드 에이전트</span>` +
+          `<span class="log-msg">테스트 케이스 ${(msg.testCases||[]).length}개 도출:\n${esc(names)}</span>`;
+        logLines.appendChild(el);
+        logLines.scrollTop = logLines.scrollHeight;
+        ovProgress.textContent = `케이스 ${(msg.testCases||[]).length}개 레코딩 시작`;
+        break;
+      }
+
       case 'analyze-recording':
-        ovName.textContent = msg.name || '';
-        appendLog('info', null, `레코딩 시작: ${msg.name}`);
+        updateAgentRow('recording', 'running', `[${msg.index}/${msg.total}] ${msg.name}`);
+        ovName.textContent = `[${msg.index}/${msg.total}] ${msg.name || ''}`;
+        if (msg.total > 0) ovBar.style.width = `${Math.round(75 + (msg.index / msg.total) * 25)}%`;
+        appendLog('info', null, `레코딩 [${msg.index}/${msg.total}]: ${msg.name}`);
         break;
 
       case 'analyze-done':
@@ -359,8 +401,11 @@
         analyzeBtn.disabled = currentPageUrl === '';
         replayBtn.disabled  = selectedId === null;
         recordBtn.disabled  = false;
+        overlay.classList.remove('analyzing');
+        ovAgents.classList.add('hidden');
         hideOverlay();
         ovTitle.innerHTML   = `${ICON('play')} 재생 중`;
+        ovBar.style.width   = '0%';
         setStatus(`분석 완료 — ${msg.created}개 테스트 케이스 생성됨`);
         document.getElementById('statusbar')?.classList.remove('replaying');
         break;
@@ -370,8 +415,11 @@
         analyzeBtn.disabled = currentPageUrl === '';
         replayBtn.disabled  = selectedId === null;
         recordBtn.disabled  = false;
+        overlay.classList.remove('analyzing');
+        ovAgents.classList.add('hidden');
         hideOverlay();
         ovTitle.innerHTML   = `${ICON('play')} 재생 중`;
+        ovBar.style.width   = '0%';
         setStatus('분석 오류: ' + (msg.message || '알 수 없는 오류'));
         appendLog('fail', null, '분석 오류: ' + (msg.message || ''));
         document.getElementById('statusbar')?.classList.remove('replaying');
@@ -677,6 +725,31 @@
       setStatus('재생 취소됨.');
     }
   });
+
+  // ── Agent panel helpers ───────────────────────────────────────────────────────
+  const AGENT_ICONS = { pending: '○', running: '↻', done: '✓', error: '✗', start: '↻', progress: '↻' };
+
+  function resetAgentPanel() {
+    ovAgents.querySelectorAll('.ov-agent-row').forEach((row) => {
+      const icon = row.querySelector('.ov-agent-icon');
+      const msg  = row.querySelector('.ov-agent-msg');
+      if (icon) { icon.className = 'ov-agent-icon pending'; icon.textContent = '○'; }
+      if (msg)  msg.textContent = '대기 중';
+    });
+  }
+
+  function updateAgentRow(agent, status, message) {
+    const row = ovAgents.querySelector(`[data-agent="${CSS.escape(agent)}"]`);
+    if (!row) return;
+    const icon = row.querySelector('.ov-agent-icon');
+    const msg  = row.querySelector('.ov-agent-msg');
+    const cls  = (status === 'start' || status === 'progress') ? 'running' : status;
+    if (icon) {
+      icon.className   = `ov-agent-icon ${cls}`;
+      icon.textContent = AGENT_ICONS[status] || '○';
+    }
+    if (msg) msg.textContent = message.slice(0, 60);
+  }
 
   // ── Analyze ────────────────────────────────────────────────────────────────────
   analyzeBtn.addEventListener('click', () => {
