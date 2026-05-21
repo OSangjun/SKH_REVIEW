@@ -35,6 +35,18 @@ const { pathUrl }         = require("./src/shared/url");
 const CHROME_PATH = process.env.CHROME_PATH;
 const VIEWPORT    = { width: 1920, height: 1080 };
 
+// ── GitLab 설정 (read_file / find_files 가 GitLab API 모드로 동작) ───────────
+// GITLAB_URL + GITLAB_TOKEN 이 모두 채워졌을 때만 GitLab 모드가 활성화되고,
+// 그 외에는 기존 로컬 파일시스템 모드로 동작한다.
+//
+// 프로젝트 경로는 현재 브라우저 페이지 URL(`https://{GITLAB_URL}/{project}/...`)
+// 에서 런타임에 추출하고, 참조 브랜치는 md 지식 파일(CLAUDE.md 등)에서 읽어온다.
+const GITLAB = {
+  url:   (process.env.GITLAB_URL   || "").replace(/\/+$/, ""),
+  token:  process.env.GITLAB_TOKEN || "",
+};
+const GITLAB_ENABLED = !!(GITLAB.url && GITLAB.token);
+
 // ── MCP 전용 상태 (server.js / state.js 와 완전 독립) ────────────────────────
 let browser = null;
 let page    = null;
@@ -690,6 +702,12 @@ async function main() {
   await server.connect(transport);
   // stderr로 출력 (stdout은 MCP 프로토콜 전용)
   process.stderr.write("[MCP] Puppeteer Recorder MCP Server 시작됨\n");
+  process.stderr.write(
+    GITLAB_ENABLED
+      ? `[MCP] GitLab 모드 활성 — ${GITLAB.url} (프로젝트는 페이지 URL, 브랜치는 md 지식에서 추출)\n`
+      : "[MCP] GitLab 모드 비활성 (로컬 파일시스템 사용). " +
+        ".env의 GITLAB_URL / GITLAB_TOKEN 설정 시 활성화됨.\n"
+  );
 }
 
 main().catch((err) => {
