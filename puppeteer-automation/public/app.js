@@ -597,6 +597,7 @@
 
   // ── Replay overlay ────────────────────────────────────────────────────────────
   function showOverlay(name, done, total) {
+    if (!suiteMode) ovTitle.innerHTML = `${ICON('play')} 재생 중`;
     ovName.textContent    = name;
     updateOverlay(done, total);
     overlay.classList.add('visible');

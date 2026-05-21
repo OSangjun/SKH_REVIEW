@@ -72,15 +72,16 @@
       <div class="canvas-wrap" data-blank="1">
         <canvas id="browser-canvas" tabindex="0"></canvas>
         <div id="result-badge" class="result-badge hidden"></div>
-        <!-- ── Replay progress overlay (canvas 영역에만 적용) ── -->
+        <!-- ── Replay progress overlay (canvas 상단 바) ── -->
         <div id="replay-overlay">
-          <div class="ov-box">
-            <div class="ov-title" id="ov-title"><span data-icon="play"></span> 재생 중</div>
-            <div class="ov-suite-info hidden" id="ov-suite-info"></div>
-            <div class="ov-name" id="ov-name"></div>
-            <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
-            <div class="ov-progress" id="ov-progress">준비 중…</div>
-            <div class="ov-suite-result hidden" id="ov-suite-result"></div>
+          <div class="ov-bar-wrap"><div class="ov-bar-fill" id="ov-bar"></div></div>
+          <div class="ov-strip">
+            <span id="ov-title" class="ov-strip-label"></span>
+            <span id="ov-suite-info" class="ov-strip-suite hidden"></span>
+            <span id="ov-name" class="ov-strip-name"></span>
+            <span class="ov-strip-spacer"></span>
+            <span id="ov-suite-result" class="ov-strip-result hidden"></span>
+            <span id="ov-progress" class="ov-strip-progress">준비 중…</span>
             <button class="ov-cancel" id="ov-cancel">취소</button>
           </div>
         </div>
