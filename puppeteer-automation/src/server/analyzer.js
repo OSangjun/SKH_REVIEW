@@ -32,6 +32,11 @@ const { isTrackerUrl }  = require("../shared/blocklist");
 const { pathUrl }       = require("../shared/url");
 const gitlab = require("./gitlab-client");
 const db     = require("./db-client");
+const {
+  projectFromUrl,
+  projectFromEndpoint,
+  branchFor,
+} = require("./source-mapping");
 
 const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
 const client    = new Anthropic();
@@ -107,6 +112,72 @@ const GITLAB_TOOLS = [
       type: "object",
       properties: { query: { type: "string", description: "검색어" } },
       required: ["query"],
+    },
+  },
+];
+
+// project 를 명시적으로 받는 동적 도구. UI 소스 분석에서 여러 프로젝트를
+// 가로질러 조회할 때 사용한다. project 미지정 시 derive_project / page URL 에서
+// 직접 얻어 호출자가 채워야 한다.
+const GITLAB_IN_TOOLS = [
+  {
+    name: "gitlab_list_files_in",
+    description: "지정한 GitLab 프로젝트의 경로 아래 파일/디렉터리 목록을 반환합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "GitLab 프로젝트 경로 (예: group/repo) 또는 숫자 ID" },
+        path:    { type: "string", description: "조회 경로 (빈 문자열이면 루트)" },
+        ref:     { type: "string", description: "브랜치/태그 (생략 시 매핑표 또는 main)" },
+      },
+      required: ["project"],
+    },
+  },
+  {
+    name: "gitlab_get_file_in",
+    description: "지정한 GitLab 프로젝트의 특정 파일 전체 내용을 반환합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project:   { type: "string", description: "GitLab 프로젝트 경로 또는 숫자 ID" },
+        file_path: { type: "string", description: "파일 경로 (예: src/router/index.ts)" },
+        ref:       { type: "string", description: "브랜치/태그 (생략 시 매핑표 또는 main)" },
+      },
+      required: ["project", "file_path"],
+    },
+  },
+  {
+    name: "gitlab_search_code_in",
+    description: "지정한 GitLab 프로젝트 전체에서 코드를 검색합니다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "GitLab 프로젝트 경로 또는 숫자 ID" },
+        query:   { type: "string", description: "검색어" },
+      },
+      required: ["project", "query"],
+    },
+  },
+  {
+    name: "derive_project_from_url",
+    description:
+      "페이지 URL 또는 API 엔드포인트 URL/경로에서 첫 path 세그먼트를 추출해 " +
+      "GitLab 프로젝트명을 결정합니다. 예: '/order/list' → 'order'.",
+    input_schema: {
+      type: "object",
+      properties: { url: { type: "string", description: "URL 또는 경로" } },
+      required: ["url"],
+    },
+  },
+  {
+    name: "get_branch_for_project",
+    description:
+      "CLAUDE.md 의 '소스 프로젝트 브랜치 매핑' 표에서 해당 프로젝트의 " +
+      "기본 브랜치를 조회합니다. 매핑이 없으면 'main' 반환.",
+    input_schema: {
+      type: "object",
+      properties: { project: { type: "string", description: "프로젝트명" } },
+      required: ["project"],
     },
   },
 ];
@@ -201,6 +272,34 @@ async function execGitlab(name, input) {
     case "gitlab_list_files":  return { files: await gitlab.listFiles(input.path || "", input.ref || "main") };
     case "gitlab_get_file":    return { content: await gitlab.getFile(input.file_path, input.ref || "main") };
     case "gitlab_search_code": return { results: await gitlab.searchCode(input.query) };
+
+    // ── project 를 명시적으로 받는 동적 버전 ──
+    case "gitlab_list_files_in": {
+      const proj = input.project;
+      if (!proj) return { error: "project is required" };
+      const ref = input.ref || branchFor(proj);
+      return { files: await gitlab.listFilesIn(proj, input.path || "", ref), ref };
+    }
+    case "gitlab_get_file_in": {
+      const proj = input.project;
+      if (!proj) return { error: "project is required" };
+      const ref = input.ref || branchFor(proj);
+      return { content: await gitlab.getFileIn(proj, input.file_path, ref), ref };
+    }
+    case "gitlab_search_code_in": {
+      const proj = input.project;
+      if (!proj) return { error: "project is required" };
+      return { results: await gitlab.searchCodeIn(proj, input.query) };
+    }
+    case "derive_project_from_url": {
+      const url = input.url || "";
+      const proj = /^https?:\/\//.test(url) ? projectFromUrl(url) : projectFromEndpoint(url);
+      return { project: proj };
+    }
+    case "get_branch_for_project": {
+      return { project: input.project, branch: branchFor(input.project) };
+    }
+
     default: return { error: `알 수 없는 GitLab 도구: ${name}` };
   }
 }
@@ -520,6 +619,96 @@ UI를 분석하여 발견사항을 send_finding으로 전달하고, 완료 후 r
   });
 }
 
+// ── 1a. UI 소스 분석 에이전트 ─────────────────────────────────────────────────
+// 페이지 origin 다음 첫 path 세그먼트를 GitLab 프로젝트로 삼아 3-level chain
+// (UI 프로젝트 → 중간 static-spring 프로젝트 → backend 프로젝트) 을 따라간다.
+//
+// 각 레벨에서 source 를 읽어 다음 레벨의 API 엔드포인트를 추출한다.
+// 한 레벨에 여러 엔드포인트가 있으면 각각의 프로젝트를 병렬로 따라가도록
+// 에이전트에게 지시한다 (실제 LLM 의 도구 호출은 직렬이지만 모든 엔드포인트를
+// 검사하도록 강제).
+async function runUISourceAgent(url) {
+  if (!gitlab.isReady()) {
+    agentMsg("ui-source", "UI 소스 분석", "done", "GitLab 미설정 — 스킵");
+    return { skipped: true, levels: [], apiEndpoints: [] };
+  }
+
+  const uiProject = projectFromUrl(url);
+  if (!uiProject) {
+    agentMsg("ui-source", "UI 소스 분석", "done", "URL에서 프로젝트 도출 실패 — 스킵");
+    return { skipped: true, levels: [], apiEndpoints: [] };
+  }
+
+  const uiBranch = branchFor(uiProject);
+  const urlPath  = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+
+  agentMsg(
+    "ui-source", "UI 소스 분석", "progress",
+    `프로젝트=${uiProject}, 브랜치=${uiBranch}, 경로=${urlPath}`,
+  );
+
+  return runAgent({
+    name: "ui-source", label: "UI 소스 분석",
+    tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    systemPrompt: `당신은 3-tier 웹 시스템의 소스코드를 가로지르며 분석하는 에이전트입니다.
+
+목표:
+- 현재 화면(UI)에서 호출되는 API 를 따라 중간 계층(Static Spring/BFF)과
+  최종 백엔드 계층까지 소스를 추적하여 비즈니스 로직을 파악한다.
+
+용어:
+- "프로젝트"는 URL 의 origin 다음 첫 path 세그먼트.
+  예: https://app.example.com/order/list  → 프로젝트 = "order"
+       /payment/charge                     → 프로젝트 = "payment"
+- "브랜치"는 get_branch_for_project 도구로 조회 (CLAUDE.md 매핑표 기반).
+
+분석 절차 (3 levels):
+
+[Level 0 — UI Vue 프로젝트]
+프로젝트="${uiProject}", 브랜치="${uiBranch}", 현재 경로="${urlPath}"
+1. gitlab_list_files_in 으로 루트 구조 파악
+2. gitlab_search_code_in 으로 Vue Router 에서 "${urlPath}" 매칭되는 라우트 검색
+3. 매핑된 .vue 컴포넌트와 import 한 API 클라이언트(src/api/, src/services/) 읽기
+4. 호출되는 API 엔드포인트 추출 → send_finding(findingType: "api_endpoint",
+   description 에 method/path/요청파라미터 포함)
+
+[Level 1 — 중간 계층 (Static Spring / BFF)]
+각 L0 엔드포인트에 대해 *모두* 다음을 수행 (병렬 의미 = 빠뜨리지 말 것):
+1. derive_project_from_url 로 엔드포인트 경로에서 프로젝트명 도출
+2. get_branch_for_project 로 브랜치 조회
+3. gitlab_search_code_in 으로 해당 핸들러(@GetMapping/@PostMapping 등) 검색
+4. 핸들러가 호출하는 다음 단계 API (RestTemplate/WebClient/Feign 등) 추출
+5. 발견되는 모든 엔드포인트 → send_finding(findingType: "api_endpoint")
+
+[Level 2 — 백엔드 계층]
+각 L1 엔드포인트에 대해 *모두* 동일하게:
+1. derive_project_from_url → 프로젝트 도출
+2. get_branch_for_project → 브랜치
+3. 컨트롤러 → 서비스 → 매퍼/리포지토리 추적
+4. 비즈니스 로직 / DB 테이블 / 권한 / 에러 시나리오 → send_finding 으로 적시 전달
+
+종료:
+- 분석 완료 후 report_findings 호출. 포함 내용:
+  {
+    levels: [
+      { level: 0, project, branch, files: [...], apiEndpoints: [{method, path}] },
+      { level: 1, projects: [{project, branch, files, apiEndpoints}] },
+      { level: 2, projects: [{project, branch, files, businessLogic, dbTables}] }
+    ],
+    apiEndpoints: [...], // 모든 레벨에서 발견한 엔드포인트 합본 (Frontend 에이전트가 재사용)
+  }`,
+    userMessage: `시작 URL: ${url}
+시작 프로젝트: ${uiProject}
+시작 브랜치: ${uiBranch}
+현재 경로: ${urlPath}
+
+위 systemPrompt 의 Level 0 → 1 → 2 절차를 따라 분석한 뒤 send_finding 으로
+중간 발견을 적시 전달하고, 모든 레벨이 끝나면 report_findings 를 호출하세요.`,
+    execTool: execGitlab,
+    maxTurns: 60,
+  });
+}
+
 // ── 2. Frontend 에이전트 ──────────────────────────────────────────────────────
 async function runFrontendAgent(url) {
   if (!gitlab.isConfigured()) {
@@ -800,33 +989,54 @@ async function runAnalysis(url) {
     let pageSource = "";
     try { pageSource = await state.activePage.evaluate(() => document.documentElement.outerHTML); } catch {}
 
-    // ── Phase 1: UI + Frontend 병렬 분석 ─────────────────────────────────
-    phaseMsg(1, 4, "UI + Frontend 소스 분석 (병렬)");
-    const [uiFindings, frontendFindings] = await Promise.all([
-      runUIAgent(url, pageSource)
-        .catch((e) => { agentMsg("ui",       "UI 분석",       "error", e.message); return {}; }),
-      runFrontendAgent(url)
-        .catch((e) => { agentMsg("frontend", "Frontend 분석", "error", e.message); return {}; }),
-    ]);
+    // ── Phase 1: UI 분석 (DOM) ───────────────────────────────────────────
+    phaseMsg(1, 5, "UI 분석 (DOM/화면 구조)");
+    const uiFindings = await runUIAgent(url, pageSource)
+      .catch((e) => { agentMsg("ui", "UI 분석", "error", e.message); return {}; });
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
-    // ── Phase 2: Backend 분석 (Frontend 결과 활용) ───────────────────────
-    phaseMsg(2, 4, "Backend 소스 분석");
+    // ── Phase 2: UI 소스 분석 (3-tier 체인) ──────────────────────────────
+    // 페이지 origin 다음 세그먼트 = 프로젝트로 잡고 Vue 컴포넌트부터
+    // 중간 계층 / 백엔드 계층까지 소스코드를 따라가며 API 엔드포인트와
+    // 비즈니스 로직을 수집한다. CLAUDE.md 매핑표에서 브랜치 조회.
+    phaseMsg(2, 5, "UI 소스 분석 (3-tier 체인)");
+    const uiSourceFindings = await runUISourceAgent(url)
+      .catch((e) => { agentMsg("ui-source", "UI 소스 분석", "error", e.message); return {}; });
+
+    if (state.analysisCancelled) throw new Error("취소됨");
+
+    // ── Phase 3: Frontend 분석 (기존 — GITLAB_PROJECT env 기반) ─────────
+    phaseMsg(3, 5, "Frontend 소스 분석");
+    const frontendFindings = await runFrontendAgent(url)
+      .catch((e) => { agentMsg("frontend", "Frontend 분석", "error", e.message); return {}; });
+
+    // UI 소스 에이전트가 찾은 endpoint 를 Frontend 결과에 병합해 두면
+    // 후속 Backend / DB 분석이 더 풍부한 입력을 받는다.
+    if (uiSourceFindings && Array.isArray(uiSourceFindings.apiEndpoints)) {
+      const merged = [
+        ...(frontendFindings.apiEndpoints || []),
+        ...uiSourceFindings.apiEndpoints,
+      ];
+      frontendFindings.apiEndpoints = merged;
+    }
+
+    if (state.analysisCancelled) throw new Error("취소됨");
+
+    // ── Phase 4: Backend 분석 (Frontend 결과 활용) ───────────────────────
+    phaseMsg(4, 5, "Backend 소스 분석");
     const backendFindings = await runBackendAgent(frontendFindings)
       .catch((e) => { agentMsg("backend", "Backend 분석", "error", e.message); return {}; });
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
-    // ── Phase 3: DB 분석 (Backend 결과 활용) ────────────────────────────
-    phaseMsg(3, 4, "DB 데이터 분석");
+    // ── Phase 5: DB 분석 + Lead 취합 + 레코딩 ────────────────────────────
+    phaseMsg(5, 5, "DB 데이터 분석 → 테스트 케이스 도출 → 레코딩");
     const dbFindings = await runDBAgent(frontendFindings, backendFindings)
       .catch((e) => { agentMsg("db", "DB 분석", "error", e.message); return {}; });
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
-    // ── Phase 4: Lead 에이전트 취합 + 레코딩 ────────────────────────────
-    phaseMsg(4, 4, "테스트 케이스 도출 및 레코딩");
     const testCases = await runLeadAgent(url, uiFindings, frontendFindings, backendFindings, dbFindings);
 
     for (let i = 0; i < testCases.length; i++) {

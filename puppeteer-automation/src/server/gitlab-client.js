@@ -72,4 +72,45 @@ async function searchCode(query) {
   return request(`/projects/${projectId()}/search?scope=blobs&search=${q}&per_page=20`);
 }
 
-module.exports = { isConfigured, listFiles, getFile, searchCode };
+// ── 동적 project 버전 (UI 소스 분석에서 매 호출마다 다른 프로젝트를 조회) ──
+// `project` 는 "group/repo" 형태의 경로 또는 숫자 ID. 함수 내부에서 URL 인코딩.
+
+function isReady() {
+  return !!(BASE && TOKEN);
+}
+
+async function listFilesIn(project, path = "", ref = "main") {
+  const pj = encodeURIComponent(project);
+  const p  = encodeURIComponent(path);
+  const r  = encodeURIComponent(ref);
+  const items = [];
+  let page = 1;
+  while (true) {
+    const batch = await request(
+      `/projects/${pj}/repository/tree?path=${p}&ref=${r}&per_page=100&page=${page}&recursive=false`
+    );
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    items.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+  }
+  return items;
+}
+
+async function getFileIn(project, filePath, ref = "main") {
+  const pj = encodeURIComponent(project);
+  const p  = encodeURIComponent(filePath);
+  const r  = encodeURIComponent(ref);
+  return request(`/projects/${pj}/repository/files/${p}/raw?ref=${r}`);
+}
+
+async function searchCodeIn(project, query) {
+  const pj = encodeURIComponent(project);
+  const q  = encodeURIComponent(query);
+  return request(`/projects/${pj}/search?scope=blobs&search=${q}&per_page=20`);
+}
+
+module.exports = {
+  isConfigured, listFiles, getFile, searchCode,
+  isReady, listFilesIn, getFileIn, searchCodeIn,
+};

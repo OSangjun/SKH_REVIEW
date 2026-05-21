@@ -312,3 +312,21 @@ set_cookies([{ name: "SESSION", value: "...", domain: ".example.com" }])
 
 `stop_recording` 완료 후 반환된 케이스 ID를 사용자에게 알린다.  
 웹 UI(`http://localhost:3000`) 또는 CLI(`node run-tests.js --id <id>`)로 즉시 리플레이 가능.
+
+---
+
+## 소스 프로젝트 브랜치 매핑
+
+UI 소스 분석 단계에서 GitLab 프로젝트를 조회할 때 사용할 기본 브랜치를 정의한다.
+프로젝트명은 페이지 URL 또는 API 엔드포인트 URL의 `origin` 다음 첫 path 세그먼트로 도출한다.
+
+| 프로젝트 | 브랜치 |
+|---------|--------|
+| order   | develop |
+| payment | develop |
+| user    | main |
+
+매핑이 없는 프로젝트는 기본 브랜치 `main`을 사용한다.
+
+이 표는 `src/server/source-mapping.js`의 `branchFor(project)` 함수가 런타임에 파싱한다.
+새 프로젝트를 추가할 때 행 하나만 더 적으면 된다.
