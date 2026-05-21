@@ -336,6 +336,21 @@ async function handleClientMessage(msg) {
       send({ type: "recordings", list: dbAllMeta() });
       break;
     }
+
+    // ── Analyze ───────────────────────────────────────────────────────────────
+    case "analyze": {
+      await finalizeInitCap();
+      const { runAnalysis } = require("./analyzer");
+      // Run async without blocking the WS handler — progress sent via send()
+      runAnalysis(msg.url || state.currentUrl).catch((err) => {
+        log("fail", `[분석] 처리되지 않은 오류: ${err.message}`);
+      });
+      break;
+    }
+    case "cancel-analyze":
+      state.analysisCancelled = true;
+      log("warn", "분석 취소 요청됨");
+      break;
   }
 }
 

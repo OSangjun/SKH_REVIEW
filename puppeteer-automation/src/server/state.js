@@ -32,6 +32,10 @@ const state = {
   replayToasts: [],
   replayToastActive: false,
   replayCancelled: false,
+
+  // Analysis
+  isAnalyzing: false,
+  analysisCancelled: false,
 };
 
 module.exports = state;

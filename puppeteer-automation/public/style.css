@@ -408,6 +408,21 @@ html, body {
 }
 .btn-replay:hover:not(:disabled) { background: var(--replay-hover); }
 
+.btn-analyze {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.btn-analyze:hover:not(:disabled) {
+  background: rgba(79, 142, 255, .12);
+  border-color: var(--accent);
+}
+.btn-analyze.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
 /* ── Status bar ──────────────────────────────────────────────────────────── */
 /* Subtle by default; emits color only when state changes (pass/fail/active). */
 #statusbar {

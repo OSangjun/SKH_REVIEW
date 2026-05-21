@@ -58,6 +58,7 @@
   const ovTitle       = document.getElementById('ov-title');
   const ovSuiteInfo   = document.getElementById('ov-suite-info');
   const ovSuiteResult = document.getElementById('ov-suite-result');
+  const analyzeBtn    = document.getElementById('analyze-btn');
   const suiteBtn      = document.getElementById('suite-btn');
   const urlTreeBtn    = document.getElementById('url-tree-btn');
   const urlTreePopup  = document.getElementById('url-tree-popup');
@@ -79,6 +80,7 @@
   let historyMap    = {};
   let viewport      = { width: 1280, height: 720 };
   let replayingName = '';
+  let isAnalyzing   = false;
 
   // ── localStorage persistence ──────────────────────────────────────────────────
   const LS_URL_KEY    = 'bat_url_history';
@@ -187,6 +189,7 @@
         frameUrlLabel.textContent = msg.url || 'about:blank';
         urlInput.value = msg.url && msg.url !== 'about:blank' ? msg.url : urlInput.value;
         currentPageUrl = msg.url || '';
+        analyzeBtn.disabled = !currentPageUrl || currentPageUrl === 'about:blank' || isAnalyzing;
         // Toggle the empty-canvas hint based on whether a real page is loaded
         const wrap = document.querySelector('.canvas-wrap');
         if (wrap) {
@@ -328,6 +331,50 @@
 
       case 'replay-result':
         showReplayResult(msg);
+        break;
+
+      // ── Analysis ──────────────────────────────────────────────────────────────
+      case 'analyze-started':
+        isAnalyzing = true;
+        analyzeBtn.disabled = true;
+        replayBtn.disabled  = true;
+        recordBtn.disabled  = true;
+        ovTitle.innerHTML   = `${ICON('zap')} 분석 중`;
+        showOverlay(msg.url || currentPageUrl, 0, 0);
+        setStatus(`분석 시작: ${msg.url || currentPageUrl}`);
+        document.getElementById('statusbar')?.classList.add('replaying');
+        break;
+
+      case 'analyze-progress':
+        setStatus(`분석 진행 중 (단계 ${msg.step}): ${msg.message || ''}`);
+        break;
+
+      case 'analyze-recording':
+        ovName.textContent = msg.name || '';
+        appendLog('info', null, `레코딩 시작: ${msg.name}`);
+        break;
+
+      case 'analyze-done':
+        isAnalyzing = false;
+        analyzeBtn.disabled = currentPageUrl === '';
+        replayBtn.disabled  = selectedId === null;
+        recordBtn.disabled  = false;
+        hideOverlay();
+        ovTitle.innerHTML   = `${ICON('play')} 재생 중`;
+        setStatus(`분석 완료 — ${msg.created}개 테스트 케이스 생성됨`);
+        document.getElementById('statusbar')?.classList.remove('replaying');
+        break;
+
+      case 'analyze-error':
+        isAnalyzing = false;
+        analyzeBtn.disabled = currentPageUrl === '';
+        replayBtn.disabled  = selectedId === null;
+        recordBtn.disabled  = false;
+        hideOverlay();
+        ovTitle.innerHTML   = `${ICON('play')} 재생 중`;
+        setStatus('분석 오류: ' + (msg.message || '알 수 없는 오류'));
+        appendLog('fail', null, '분석 오류: ' + (msg.message || ''));
+        document.getElementById('statusbar')?.classList.remove('replaying');
         break;
 
       case 'log':
@@ -617,13 +664,24 @@
   }
 
   ovCancel.addEventListener('click', () => {
-    send({ type: 'cancel-replay' });
-    hideOverlay();
-    isReplaying = false;
-    suiteMode   = false;
-    replayBtn.disabled  = selectedId === null;
-    recordBtn.disabled  = false;
-    setStatus('재생 취소됨.');
+    if (isAnalyzing) {
+      send({ type: 'cancel-analyze' });
+      setStatus('분석 취소 중…');
+    } else {
+      send({ type: 'cancel-replay' });
+      hideOverlay();
+      isReplaying = false;
+      suiteMode   = false;
+      replayBtn.disabled  = selectedId === null;
+      recordBtn.disabled  = false;
+      setStatus('재생 취소됨.');
+    }
+  });
+
+  // ── Analyze ────────────────────────────────────────────────────────────────────
+  analyzeBtn.addEventListener('click', () => {
+    if (isAnalyzing || !currentPageUrl || currentPageUrl === 'about:blank') return;
+    send({ type: 'analyze', url: currentPageUrl });
   });
 
   // ── Export ────────────────────────────────────────────────────────────────────

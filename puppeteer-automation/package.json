@@ -12,12 +12,15 @@
     "cli:replay": "node src/index.js replay"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.97.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.9.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "element-plus": "^2.13.7",
     "express": "^5.2.1",
+    "mysql2": "^3.22.3",
+    "pg": "^8.21.0",
     "puppeteer-core": "^24.42.0",
     "vue": "^3.5.33",
     "ws": "^8.20.0"
