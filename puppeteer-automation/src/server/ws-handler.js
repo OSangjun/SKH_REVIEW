@@ -18,6 +18,8 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
+
 // 초기화 녹화 확정 저장.
 // navigate 후 pendingInitCap에 누적된 응답을 첫 사용자 입력 시점에 호출해 저장한다.
 async function finalizeInitCap() {
@@ -147,13 +149,21 @@ async function handleClientMessage(msg) {
       break;
 
     // ── Keyboard events ───────────────────────────────────────────────────────
-    case "keydown":
+    case "keydown": {
       await finalizeInitCap();
-      await state.activePage.keyboard.down(msg.key === " " ? "Space" : msg.key);
+      const key = msg.key === " " ? "Space" : msg.key;
+      if (!SKIP_KEYS.has(key)) {
+        try { await state.activePage.keyboard.down(key); } catch {}
+      }
       break;
-    case "keyup":
-      await state.activePage.keyboard.up(msg.key === " " ? "Space" : msg.key);
+    }
+    case "keyup": {
+      const key = msg.key === " " ? "Space" : msg.key;
+      if (!SKIP_KEYS.has(key)) {
+        try { await state.activePage.keyboard.up(key); } catch {}
+      }
       break;
+    }
 
     // ── Recording ─────────────────────────────────────────────────────────────
     case "start-recording":

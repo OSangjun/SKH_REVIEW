@@ -104,6 +104,13 @@ async function tryHoverAncestorTrigger(page, selector) {
   return true;
 }
 
+// Keys that have no Puppeteer equivalent and must be silently skipped.
+// "Process"    — IME 조합 중 키 (한국어·일본어·중국어 입력 시 발생)
+// "Unidentified" — 브라우저가 식별 불가한 키
+// "Dead"       — 악센트 조합 키 (프랑스어 등)
+// "Compose"    — Linux Compose 키
+const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
+
 // Events whose dispatch is followed by a network-idle wait (they typically
 // trigger HTTP requests).
 const NETWORK_EVTS = new Set(["navigate", "click", "dblclick"]);
@@ -212,12 +219,20 @@ async function dispatchEvent(page, ev, baseUrl, fast = false) {
     case "scroll":
       await page.evaluate((x, y) => window.scrollTo(x, y), ev.scrollX, ev.scrollY);
       break;
-    case "keydown":
-      await page.keyboard.down(ev.key === " " ? "Space" : ev.key);
+    case "keydown": {
+      const key = ev.key === " " ? "Space" : ev.key;
+      if (!SKIP_KEYS.has(key)) {
+        try { await page.keyboard.down(key); } catch {}
+      }
       break;
-    case "keyup":
-      await page.keyboard.up(ev.key === " " ? "Space" : ev.key);
+    }
+    case "keyup": {
+      const key = ev.key === " " ? "Space" : ev.key;
+      if (!SKIP_KEYS.has(key)) {
+        try { await page.keyboard.up(key); } catch {}
+      }
       break;
+    }
     case "input":
       if (ev.selector) {
         try {
