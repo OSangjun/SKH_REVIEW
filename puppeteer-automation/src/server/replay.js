@@ -33,6 +33,8 @@ const UI_SETTLE_MS = 150;
 
 const BTN = (b) => (b === "right" ? "right" : b === "middle" ? "middle" : "left");
 
+const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -241,12 +243,20 @@ async function dispatchReplayEvent(ev) {
           ev.scrollY,
         );
         break;
-      case "keydown":
-        await state.activePage.keyboard.down(ev.key === " " ? "Space" : ev.key);
+      case "keydown": {
+        const key = ev.key === " " ? "Space" : ev.key;
+        if (!SKIP_KEYS.has(key)) {
+          try { await state.activePage.keyboard.down(key); } catch {}
+        }
         break;
-      case "keyup":
-        await state.activePage.keyboard.up(ev.key === " " ? "Space" : ev.key);
+      }
+      case "keyup": {
+        const key = ev.key === " " ? "Space" : ev.key;
+        if (!SKIP_KEYS.has(key)) {
+          try { await state.activePage.keyboard.up(key); } catch {}
+        }
         break;
+      }
       case "input":
         flashElement(ev.selector, null, null, "input");
         if (ev.selector) {
@@ -292,8 +302,35 @@ async function dispatchReplayEvent(ev) {
           try {
             const el = await pickByLabelOrFirst(state.activePage, ev.selector, ev.label);
             if (el) {
-              const cur = await el.evaluate((n) => n.checked);
-              if (cur !== ev.checked) await el.click();
+              const info = await el.evaluate((input) => {
+                const s = window.getComputedStyle(input);
+                const hidden =
+                  parseFloat(s.opacity) < 0.1 ||
+                  s.visibility === "hidden"     ||
+                  s.display === "none"          ||
+                  (s.position === "absolute" && input.offsetWidth === 0 && input.offsetHeight === 0);
+                const cur = input.indeterminate ? null : input.checked;
+                if (!hidden) return { cur, cx: null, cy: null };
+                const candidates = [
+                  input.closest("label.el-checkbox, label.el-radio, label.el-checkbox-button, label.el-radio-button"),
+                  input.parentElement && input.parentElement.querySelector(".el-checkbox__inner, .el-radio__inner"),
+                  input.parentElement,
+                ];
+                for (const c of candidates) {
+                  if (!c) continue;
+                  const r = c.getBoundingClientRect();
+                  if (r.width > 0 && r.height > 0) {
+                    c.scrollIntoView({ block: "nearest" });
+                    const r2 = c.getBoundingClientRect();
+                    return { cur, cx: r2.left + r2.width / 2, cy: r2.top + r2.height / 2 };
+                  }
+                }
+                return { cur, cx: null, cy: null };
+              });
+              if (info.cur !== ev.checked) {
+                if (info.cx !== null) await state.activePage.mouse.click(info.cx, info.cy);
+                else await el.click();
+              }
               break;
             }
           } catch {}
