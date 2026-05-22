@@ -223,17 +223,19 @@ function compareTriggerMappings(events, replayTriggerMap) {
 function compareDomSnapshots(recorded, replayed) {
   if (!recorded || recorded.length === 0) return [];
   const byPath = new Map();
-  const allTexts = new Set();
+  const byText = new Map();
   for (const r of (replayed || [])) {
     if (!byPath.has(r.path)) byPath.set(r.path, []);
-    byPath.get(r.path).push(r.text);
-    allTexts.add(r.text);
+    byPath.get(r.path).push(r);
+    if (!byText.has(r.text)) byText.set(r.text, []);
+    byText.get(r.text).push(r);
   }
   return recorded.map((r) => {
-    const atPath = byPath.get(r.path) ?? [];
-    if (atPath.includes(r.text)) return { path: r.path, text: r.text, pass: true };
-    if (allTexts.has(r.text))    return { path: r.path, text: r.text, pass: true, pathMoved: true };
-    return { path: r.path, text: r.text, pass: false };
+    const atPath = (byPath.get(r.path) ?? []).find((e) => e.text === r.text);
+    if (atPath) return { path: r.path, text: r.text, pass: true, rect: atPath.rect ?? null };
+    const atOther = (byText.get(r.text) ?? [])[0];
+    if (atOther) return { path: r.path, text: r.text, pass: true, pathMoved: true, rect: atOther.rect ?? null };
+    return { path: r.path, text: r.text, pass: false, rect: null };
   });
 }
 

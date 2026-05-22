@@ -253,6 +253,7 @@
 
       case 'replay-started':
         isReplaying = true;
+        activeDomHighlights = [];
         if (!suiteMode) {
           replayBtn.disabled = true;
           recordBtn.disabled = true;
@@ -441,9 +442,42 @@
   }
 
   // ── Canvas frame rendering ────────────────────────────────────────────────────
+  let activeDomHighlights = [];
+
+  function _drawDomHighlights() {
+    if (!activeDomHighlights.length) return;
+    for (const h of activeDomHighlights) {
+      if (!h.rect || !h.rect.w || !h.rect.h) continue;
+      const { x, y, w, h: rh } = h.rect;
+      ctx.save();
+      if (h.kind === 'fail') {
+        ctx.strokeStyle = 'rgba(239,68,68,0.95)';
+        ctx.fillStyle   = 'rgba(239,68,68,0.18)';
+      } else {
+        ctx.strokeStyle = 'rgba(251,146,60,0.95)';
+        ctx.fillStyle   = 'rgba(251,146,60,0.12)';
+      }
+      ctx.lineWidth = 2;
+      ctx.fillRect(x, y, w, rh);
+      ctx.strokeRect(x, y, w, rh);
+      const prefix = h.kind === 'fail' ? '✗ ' : '~ ';
+      const label  = prefix + h.text.slice(0, 35) + (h.text.length > 35 ? '…' : '');
+      ctx.font = 'bold 11px ui-monospace, monospace';
+      const textW  = ctx.measureText(label).width + 10;
+      const labelH = 17;
+      const labelY = y >= labelH ? y - labelH : y + rh;
+      ctx.fillStyle = h.kind === 'fail' ? 'rgba(239,68,68,0.95)' : 'rgba(251,146,60,0.95)';
+      ctx.fillRect(x, labelY, textW, labelH);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, x + 5, labelY + 12);
+      ctx.restore();
+    }
+  }
+
   const img = new Image();
   img.addEventListener('load', () => {
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    _drawDomHighlights();
   });
 
   function renderFrame(base64) {
@@ -1093,11 +1127,22 @@
   });
 
   // ── Replay result badge ───────────────────────────────────────────────────────
-  function showReplayResult({ results, toastResults, triggerResults, jsErrors, passed, failed, total }) {
+  function renderDomHighlights(domResults) {
+    activeDomHighlights = (domResults || [])
+      .filter((r) => !r.pass || r.pathMoved)
+      .map((r) => ({ kind: r.pass ? 'warn' : 'fail', text: r.text, rect: r.rect }))
+      .filter((h) => h.rect && h.rect.w > 0 && h.rect.h > 0);
+    _drawDomHighlights();
+  }
+
+  function showReplayResult({ results, toastResults, triggerResults, domResults, jsErrors, passed, failed, total }) {
+    renderDomHighlights(domResults);
     resultBadge.className = 'result-badge';
 
     const jsFail      = (jsErrors       || []).length;
     const triggerFail = (triggerResults || []).filter(r => !r.pass).length;
+    const domFail     = (domResults     || []).filter(r => !r.pass).length;
+    const domWarn     = (domResults     || []).filter(r => r.pass && r.pathMoved).length;
     const totalFail   = failed;  // already includes all failure types from server
 
     if (total === 0 && jsFail === 0) {
@@ -1113,16 +1158,20 @@
       text = `SUCCESS  ${passed}/${total}`;
       if (toastResults && toastResults.length) extras.push(`${ICON('bell')} ${toastResults.length}`);
       if (triggerResults && triggerResults.length) extras.push(`${ICON('link')} ${triggerResults.length}`);
+      if (domWarn) extras.push(`DOM~${domWarn}`);
     } else if (passed === 0 && totalFail > 0) {
       cls  = 'fail';
       iconSvg = ICON('xCircle');
       text = `FAIL  ${totalFail}건 실패`;
       if (jsFail)      extras.push(`JS×${jsFail}`);
       if (triggerFail) extras.push(`${ICON('link')}×${triggerFail}`);
+      if (domFail)     extras.push(`DOM×${domFail}`);
     } else {
       cls  = 'mixed';
       iconSvg = ICON('xCircle');
       text = `PARTIAL  ${passed} 성공 / ${totalFail} 실패`;
+      if (domFail) extras.push(`DOM×${domFail}`);
+      if (domWarn) extras.push(`DOM~${domWarn}`);
     }
 
     resultBadge.classList.add(cls);

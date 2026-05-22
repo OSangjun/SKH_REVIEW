@@ -71,7 +71,9 @@ async function captureDomSnapshot(page) {
       const cs = window.getComputedStyle(el);
       if (cs.display === "none" || cs.visibility === "hidden") continue;
       if (parseFloat(cs.opacity) < 0.05) continue;
-      results.push({ path: buildPath(el), text });
+      const br = el.getBoundingClientRect();
+      results.push({ path: buildPath(el), text,
+        rect: { x: Math.round(br.x), y: Math.round(br.y), w: Math.round(br.width), h: Math.round(br.height) } });
     }
     return results;
   }).catch(() => []);
