@@ -341,7 +341,6 @@ module.exports = {
   NETWORK_EVTS,
   NO_DELAY_EVTS,
   pickByLabelOrFirst,
-  tryHoverAncestorTrigger,
   dispatchEvent,
   waitNetworkIdle,
 };

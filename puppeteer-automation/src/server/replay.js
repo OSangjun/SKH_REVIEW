@@ -8,7 +8,6 @@ const {
   compareToasts,
   compareTriggerMappings,
   compareDomSnapshots,
-  buildResponseMap,
   isNetworkTrigger,
 } = require("../shared/compare");
 const { canonicalUrl, pathUrl } = require("../shared/url");
@@ -429,8 +428,6 @@ async function runReplay(
   const replayResponses = [];
   const replayResponseUrls = []; // synchronous URL capture for trigger mapping
   const replayRespPending = new Set();
-  // eslint-disable-next-line no-unused-vars
-  const recMap = buildResponseMap(recordedResponses);
   const replayTriggerMap = new Map(); // eventIdx → [url, ...]
   const jsErrors = [];
 

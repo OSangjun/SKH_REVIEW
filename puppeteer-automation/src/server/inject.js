@@ -430,36 +430,4 @@ function buildCaptureScript() {
   })();`;
 }
 
-const TOAST_OBSERVER_SCRIPT = `(function() {
-  if (window.__CDP_TOAST_OBSERVER__) return;
-  window.__CDP_TOAST_OBSERVER__ = true;
-  var seen = new WeakSet();
-  var obs  = new MutationObserver(function(muts) {
-    for (var i = 0; i < muts.length; i++) {
-      var added = muts[i].addedNodes;
-      for (var j = 0; j < added.length; j++) {
-        var node = added[j];
-        if (node.nodeType !== 1) continue;
-        var els = (node.matches && node.matches('[role="alert"],[role="status"]'))
-          ? [node]
-          : (node.querySelectorAll
-              ? Array.prototype.slice.call(node.querySelectorAll('[role="alert"],[role="status"]'))
-              : []);
-        for (var k = 0; k < els.length; k++) {
-          var el = els[k];
-          if (seen.has(el)) continue;
-          seen.add(el);
-          var text = (el.innerText || el.textContent || '').trim();
-          if (text && window.__captureToast) window.__captureToast(text);
-        }
-      }
-    }
-  });
-  function start() {
-    if (document.body) obs.observe(document.body, { childList: true, subtree: true });
-  }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
-  else start();
-})();`;
-
-module.exports = { buildCaptureScript, TOAST_OBSERVER_SCRIPT };
+module.exports = { buildCaptureScript };

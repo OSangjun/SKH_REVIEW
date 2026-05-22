@@ -1090,11 +1090,8 @@
 
   // ── Log panel ─────────────────────────────────────────────────────────────────
   const MAX_LOG_LINES = 500;
-  let lastLogLevel = 'info';
 
   function appendLog(level, ts, message) {
-    lastLogLevel = level;
-
     const line = document.createElement('div');
     line.className = `log-line ${level}`;
     line.innerHTML =
