@@ -7,6 +7,7 @@ const {
   compareResponses,
   compareToasts,
   compareTriggerMappings,
+  compareDomSnapshots,
   buildResponseMap,
   isNetworkTrigger,
 } = require("../shared/compare");
@@ -37,6 +38,43 @@ const SKIP_KEYS = new Set(["Process", "Unidentified", "Dead", "Compose", "OS"]);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Capture visible text nodes from the page as [{path, text}].
+// Skips script/style/noscript elements and hidden/invisible elements.
+async function captureDomSnapshot(page) {
+  return page.evaluate(() => {
+    const SKIP_TAGS = new Set(["script", "style", "noscript", "head", "meta", "link"]);
+    function buildPath(el) {
+      const parts = [];
+      let cur = el;
+      while (cur && cur !== document.body && cur.tagName) {
+        const tag = cur.tagName.toLowerCase();
+        if (cur.id) { parts.unshift("#" + cur.id); break; }
+        const sibs = cur.parentElement
+          ? Array.from(cur.parentElement.children).filter((c) => c.tagName === cur.tagName)
+          : [cur];
+        const idx = sibs.indexOf(cur);
+        parts.unshift(sibs.length > 1 ? `${tag}:${idx}` : tag);
+        cur = cur.parentElement;
+      }
+      return parts.join(">");
+    }
+    const results = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = (node.textContent || "").trim().replace(/\s+/g, " ");
+      if (!text) continue;
+      const el = node.parentElement;
+      if (!el || SKIP_TAGS.has(el.tagName.toLowerCase())) continue;
+      const cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") continue;
+      if (parseFloat(cs.opacity) < 0.05) continue;
+      results.push({ path: buildPath(el), text });
+    }
+    return results;
+  }).catch(() => []);
 }
 
 async function waitNetworkIdle(timeout = 60000, idleTime = 500) {
@@ -380,6 +418,7 @@ async function runReplay(
   recordingToasts = [],
   compareHttp = true,
   mockReplay = false,
+  recordingDomSnapshot = [],
 ) {
   const startMs = Date.now();
   if (!isSuite) send({ type: "replay-started" });
@@ -435,6 +474,7 @@ async function runReplay(
   state.activePage.on("response", onResponse);
 
   let mockRequestHandler = null;
+  let replayDomSnapshot = [];
 
   try {
     state.firstNavigateDone = false;
@@ -591,6 +631,9 @@ async function runReplay(
     // Update the last trigger's map with ALL responses captured since it fired.
     if (lastTriggerIdx >= 0)
       replayTriggerMap.set(lastTriggerIdx, replayResponseUrls.slice(lastTriggerSnapLen));
+
+    // Capture final DOM state for comparison
+    replayDomSnapshot = await captureDomSnapshot(state.activePage);
   } catch (err) {
     log("fail", `재생 오류: ${err.message}`);
   } finally {
@@ -617,12 +660,14 @@ async function runReplay(
 
   const toastResults = compareToasts(recordingToasts, state.replayToasts);
   const triggerResults = compareTriggerMappings(events, replayTriggerMap);
+  const domResults = compareDomSnapshots(recordingDomSnapshot, replayDomSnapshot);
   const passed = results.filter((r) => r.pass).length;
   const httpFailed = results.filter((r) => !r.pass).length;
   const toastFailed = toastResults.filter((r) => !r.pass).length;
   const triggerFailed = triggerResults.filter((r) => !r.pass).length;
+  const domFailed = domResults.filter((r) => !r.pass).length;
   const scriptFailed = jsErrors.length;
-  const failed = httpFailed + toastFailed + triggerFailed + scriptFailed;
+  const failed = httpFailed + toastFailed + triggerFailed + domFailed + scriptFailed;
 
   if (results.length > 0) {
     if (httpFailed === 0)
@@ -675,20 +720,34 @@ async function runReplay(
     }
   }
 
+  if (domResults.length > 0) {
+    const domPassed = domResults.filter((r) => r.pass).length;
+    if (domFailed === 0)
+      log("success", `━━ DOM 텍스트: SUCCESS — ${domPassed}/${domResults.length} 일치 ━━`);
+    else
+      log("fail", `━━ DOM 텍스트: FAIL — ${domFailed}/${domResults.length} 불일치 ━━`);
+    for (const r of domResults) {
+      if (!r.pass)
+        log("fail", `  ✗ [DOM] "${r.text.slice(0, 60)}" — 재생 화면에 없음 (경로: ${r.path})`);
+      else if (r.pathMoved)
+        log("warn", `  ~ [DOM] "${r.text.slice(0, 60)}" — 위치 변경됨 (경로 불일치)`);
+    }
+  }
+
   if (jsErrors.length > 0) {
     log("fail", `━━ 스크립트 에러 ${jsErrors.length}건 감지 ━━`);
     for (const e of jsErrors) log("fail", `  ✗ [JS Error] ${e}`);
   }
 
-  const total = results.length + toastResults.length + triggerResults.length;
+  const total = results.length + toastResults.length + triggerResults.length + domResults.length;
   const durationMs = Date.now() - startMs;
   dbSaveHistory(recordingId, passed, failed, total, results, durationMs);
   send({ type: "history", recordingId, runs: dbGetHistory(recordingId) });
 
   if (!isSuite) send({ type: "replay-done" });
-  send({ type: "replay-result", results, toastResults, triggerResults, passed, failed, total, jsErrors });
+  send({ type: "replay-result", results, toastResults, triggerResults, domResults, passed, failed, total, jsErrors });
 
   return { passed, failed, total };
 }
 
-module.exports = { runReplay, mapResponsesToEvents };
+module.exports = { runReplay, mapResponsesToEvents, captureDomSnapshot };

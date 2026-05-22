@@ -2,12 +2,12 @@
 
 const {
   dbGetMeta, dbAllMeta,
-  dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts,
+  dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts, dbLoadDomSnapshot,
   dbSaveRecording, dbUpdateMeta, dbUpdateName,
   dbDeleteRecording, dbDeleteHistoryByRecording,
   dbFindInitByUrl,
 } = require("./db");
-const { runReplay, mapResponsesToEvents } = require("./replay");
+const { runReplay, mapResponsesToEvents, captureDomSnapshot } = require("./replay");
 const { isApiResponse } = require("../shared/api-filter");
 const { isTrackerUrl } = require("../shared/blocklist");
 const { pathUrl } = require("../shared/url");
@@ -202,6 +202,9 @@ async function handleClientMessage(msg) {
       if (triggeredCount > 0)
         console.log(`[Recording] Event→HTTP mapping: ${triggeredCount} events mapped`);
 
+      const domSnapshot = await captureDomSnapshot(state.activePage);
+      console.log(`[Recording] DOM snapshot: ${domSnapshot.length} text nodes`);
+
       const createdAt = new Date().toISOString();
       const newId = dbSaveRecording(
         `테스트 케이스 #?`,
@@ -212,6 +215,7 @@ async function handleClientMessage(msg) {
         [...state.capturedResponses],
         [...state.sessionCookies],
         [...state.capturedToasts],
+        domSnapshot,
       );
       dbUpdateName(newId, `테스트 케이스 #${newId}`);
       const meta = dbGetMeta(newId);
@@ -237,6 +241,7 @@ async function handleClientMessage(msg) {
       const responses = dbLoadResponses(msg.id);
       const cookies = dbLoadCookies(msg.id);
       const toasts = dbLoadToasts(msg.id);
+      const domSnapshot = dbLoadDomSnapshot(msg.id);
       await runReplay(
         msg.id,
         events,
@@ -247,6 +252,7 @@ async function handleClientMessage(msg) {
         toasts,
         msg.compareHttp !== false,
         !!msg.mockReplay,
+        domSnapshot,
       );
       break;
     }
@@ -277,6 +283,7 @@ async function handleClientMessage(msg) {
         const responses = dbLoadResponses(id);
         const cookies = dbLoadCookies(id);
         const toasts = dbLoadToasts(id);
+        const domSnapshot = dbLoadDomSnapshot(id);
 
         send({ type: "suite-item-started", index: i, total: ids.length, name: meta.name });
         log("info", `━━ [${i + 1}/${ids.length}] ${meta.name} ━━`);
@@ -291,6 +298,7 @@ async function handleClientMessage(msg) {
           toasts,
           msg.compareHttp !== false,
           !!msg.mockReplay,
+          domSnapshot,
         );
 
         if (result.failed === 0) suitePass++;

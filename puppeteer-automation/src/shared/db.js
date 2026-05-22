@@ -35,11 +35,12 @@ function openDb() {
 
   // Idempotent column migrations — silently ignored if already added.
   for (const col of [
-    `ALTER TABLE recordings ADD COLUMN responses   TEXT NOT NULL DEFAULT '[]'`,
-    `ALTER TABLE recordings ADD COLUMN description TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE recordings ADD COLUMN tags        TEXT NOT NULL DEFAULT '[]'`,
-    `ALTER TABLE recordings ADD COLUMN cookies     TEXT NOT NULL DEFAULT '[]'`,
-    `ALTER TABLE recordings ADD COLUMN toasts      TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN responses    TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN description  TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE recordings ADD COLUMN tags         TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN cookies      TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN toasts       TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN dom_snapshot TEXT NOT NULL DEFAULT '[]'`,
   ]) {
     try { db.exec(col); } catch {}
   }

@@ -10,8 +10,8 @@ const db = openDb();
 
 const stmts = {
   insertRecording: db.prepare(
-    `INSERT INTO recordings (name, url, event_count, created_at, events, responses, cookies, toasts)
-     VALUES (@name, @url, @event_count, @created_at, @events, @responses, @cookies, @toasts)`,
+    `INSERT INTO recordings (name, url, event_count, created_at, events, responses, cookies, toasts, dom_snapshot)
+     VALUES (@name, @url, @event_count, @created_at, @events, @responses, @cookies, @toasts, @dom_snapshot)`,
   ),
   updateMeta: db.prepare(
     `UPDATE recordings SET name=@name, description=@description, tags=@tags WHERE id=@id`,
@@ -29,7 +29,8 @@ const stmts = {
   getEvents: db.prepare(`SELECT events    FROM recordings WHERE id = ?`),
   getResponses: db.prepare(`SELECT responses FROM recordings WHERE id = ?`),
   getCookies: db.prepare(`SELECT cookies   FROM recordings WHERE id = ?`),
-  getToasts: db.prepare(`SELECT toasts    FROM recordings WHERE id = ?`),
+  getToasts: db.prepare(`SELECT toasts       FROM recordings WHERE id = ?`),
+  getDomSnapshot: db.prepare(`SELECT dom_snapshot FROM recordings WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
   insertHistory: db.prepare(
     `INSERT INTO run_history (recording_id, run_at, passed, failed, total, results, duration_ms)
@@ -111,7 +112,11 @@ function dbLoadToasts(id) {
   const row = stmts.getToasts.get(id);
   return row ? tryJson(row.toasts, []) : [];
 }
-function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies, toasts) {
+function dbLoadDomSnapshot(id) {
+  const row = stmts.getDomSnapshot.get(id);
+  return row ? tryJson(row.dom_snapshot, []) : [];
+}
+function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies, toasts, domSnapshot) {
   const info = stmts.insertRecording.run({
     name, url,
     event_count: eventCount,
@@ -120,6 +125,7 @@ function dbSaveRecording(name, url, eventCount, createdAt, events, responses, co
     responses: JSON.stringify(responses),
     cookies: JSON.stringify(cookies ?? []),
     toasts: JSON.stringify(toasts ?? []),
+    dom_snapshot: JSON.stringify(domSnapshot ?? []),
   });
   return info.lastInsertRowid;
 }
@@ -158,7 +164,7 @@ module.exports = {
   db,
   tryJson,
   dbAllMeta, dbGetMeta,
-  dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts,
+  dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts, dbLoadDomSnapshot,
   dbSaveRecording, dbUpdateMeta, dbUpdateName, dbUpdateResponses, dbDeleteRecording,
   dbDeleteHistoryByRecording,
   dbGetHistory, dbAllHistory, dbSaveHistory,

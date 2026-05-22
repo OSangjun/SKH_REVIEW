@@ -215,6 +215,28 @@ function compareTriggerMappings(events, replayTriggerMap) {
   return results;
 }
 
+// Compare recorded vs replay DOM text snapshots.
+// Each entry: { path, text }. Matching strategy:
+//   1. Exact path+text match → pass
+//   2. Same text found at a different path (element moved) → pass with pathMoved flag
+//   3. Text not found anywhere in replay → fail
+function compareDomSnapshots(recorded, replayed) {
+  if (!recorded || recorded.length === 0) return [];
+  const byPath = new Map();
+  const allTexts = new Set();
+  for (const r of (replayed || [])) {
+    if (!byPath.has(r.path)) byPath.set(r.path, []);
+    byPath.get(r.path).push(r.text);
+    allTexts.add(r.text);
+  }
+  return recorded.map((r) => {
+    const atPath = byPath.get(r.path) ?? [];
+    if (atPath.includes(r.text)) return { path: r.path, text: r.text, pass: true };
+    if (allTexts.has(r.text))    return { path: r.path, text: r.text, pass: true, pathMoved: true };
+    return { path: r.path, text: r.text, pass: false };
+  });
+}
+
 function isNetworkTrigger(ev) {
   return (
     ["click", "dblclick", "navigate", "check", "select"].includes(ev.type) ||
@@ -229,6 +251,7 @@ module.exports = {
   compareResponses,
   compareToasts,
   compareTriggerMappings,
+  compareDomSnapshots,
   isNetworkTrigger,
   MAX_DIFFS,
 };
