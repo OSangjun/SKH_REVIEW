@@ -450,26 +450,40 @@
       if (!h.rect || !h.rect.w || !h.rect.h) continue;
       const { x, y, w, h: rh } = h.rect;
       ctx.save();
-      if (h.kind === 'fail') {
-        ctx.strokeStyle = 'rgba(239,68,68,0.95)';
-        ctx.fillStyle   = 'rgba(239,68,68,0.18)';
+      ctx.font = 'bold 11px ui-monospace, monospace';
+      if (h.kind === 'fail-ghost') {
+        // Dashed red box at the recorded position ("was here")
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(239,68,68,0.9)';
+        ctx.fillStyle   = 'rgba(239,68,68,0.08)';
+        ctx.lineWidth = 2;
+        ctx.fillRect(x, y, w, rh);
+        ctx.strokeRect(x, y, w, rh);
+        const label  = '✗ ' + h.text.slice(0, 35) + (h.text.length > 35 ? '…' : '');
+        const textW  = ctx.measureText(label).width + 10;
+        const labelH = 17;
+        const labelY = y >= labelH ? y - labelH : y + rh;
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(239,68,68,0.9)';
+        ctx.fillRect(x, labelY, textW, labelH);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, x + 5, labelY + 12);
       } else {
+        // Solid box: orange for pathMoved
         ctx.strokeStyle = 'rgba(251,146,60,0.95)';
         ctx.fillStyle   = 'rgba(251,146,60,0.12)';
+        ctx.lineWidth = 2;
+        ctx.fillRect(x, y, w, rh);
+        ctx.strokeRect(x, y, w, rh);
+        const label  = '~ ' + h.text.slice(0, 35) + (h.text.length > 35 ? '…' : '');
+        const textW  = ctx.measureText(label).width + 10;
+        const labelH = 17;
+        const labelY = y >= labelH ? y - labelH : y + rh;
+        ctx.fillStyle = 'rgba(251,146,60,0.95)';
+        ctx.fillRect(x, labelY, textW, labelH);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, x + 5, labelY + 12);
       }
-      ctx.lineWidth = 2;
-      ctx.fillRect(x, y, w, rh);
-      ctx.strokeRect(x, y, w, rh);
-      const prefix = h.kind === 'fail' ? '✗ ' : '~ ';
-      const label  = prefix + h.text.slice(0, 35) + (h.text.length > 35 ? '…' : '');
-      ctx.font = 'bold 11px ui-monospace, monospace';
-      const textW  = ctx.measureText(label).width + 10;
-      const labelH = 17;
-      const labelY = y >= labelH ? y - labelH : y + rh;
-      ctx.fillStyle = h.kind === 'fail' ? 'rgba(239,68,68,0.95)' : 'rgba(251,146,60,0.95)';
-      ctx.fillRect(x, labelY, textW, labelH);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(label, x + 5, labelY + 12);
       ctx.restore();
     }
   }
@@ -1130,7 +1144,13 @@
   function renderDomHighlights(domResults) {
     activeDomHighlights = (domResults || [])
       .filter((r) => !r.pass || r.pathMoved)
-      .map((r) => ({ kind: r.pass ? 'warn' : 'fail', text: r.text, rect: r.rect }))
+      .map((r) => {
+        if (!r.pass) {
+          // Use the recording-side rect as a "ghost" to show where it was
+          return { kind: 'fail-ghost', text: r.text, rect: r.recRect ?? null };
+        }
+        return { kind: 'warn', text: r.text, rect: r.rect };
+      })
       .filter((h) => h.rect && h.rect.w > 0 && h.rect.h > 0);
     _drawDomHighlights();
   }

@@ -235,7 +235,7 @@ function compareDomSnapshots(recorded, replayed) {
     if (atPath) return { path: r.path, text: r.text, pass: true, rect: atPath.rect ?? null };
     const atOther = (byText.get(r.text) ?? [])[0];
     if (atOther) return { path: r.path, text: r.text, pass: true, pathMoved: true, rect: atOther.rect ?? null };
-    return { path: r.path, text: r.text, pass: false, rect: null };
+    return { path: r.path, text: r.text, pass: false, rect: null, recRect: r.rect ?? null };
   });
 }
 
