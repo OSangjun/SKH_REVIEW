@@ -240,9 +240,36 @@ src/shared/url.js
 ## 환경 변수 (`.env`)
 
 ```
+# ── 필수 ───────────────────────────────────────────────────────────────────
 CHROME_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome
 PORT=3000
-BASE_URL=                 # 옵션: 리플레이 기본 URL 오버라이드
+BASE_URL=                       # 리플레이 origin 오버라이드 (예: https://staging.example.com)
+
+# ── 분석 버튼 ───────────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY=               # 분석 버튼 필수
+
+# GitLab 소스 조회 (선택 — 미설정 시 에이전트 스킵)
+GITLAB_URL=https://gitlab.example.com
+GITLAB_TOKEN=
+GITLAB_PROJECT=group/repo        # GITLAB_IN 도구 미사용 시 기본 프로젝트
+
+# Local DB — 도메인/업무 데이터 (선택 — 미설정 시 db_query 도구 미등록)
+DB_ENGINE=                       # pg | mariadb | tibero
+DB_HOST=localhost
+DB_PORT=
+DB_USER=
+DB_PASSWORD=
+DB_NAME=
+TIBERO_ODBC_DSN=                 # Tibero only
+
+# Center DB — 공통/마스터 데이터 (선택)
+CENTER_DB_ENGINE=
+CENTER_DB_HOST=localhost
+CENTER_DB_PORT=
+CENTER_DB_USER=
+CENTER_DB_PASSWORD=
+CENTER_DB_NAME=
+CENTER_TIBERO_ODBC_DSN=
 ```
 
 ---
