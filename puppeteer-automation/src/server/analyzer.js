@@ -3,13 +3,27 @@
 /**
  * analyzer.js — 멀티 에이전트 분석 시스템
  *
- * 에이전트 팀:
- *   UIAgent      : 현재 페이지 DOM/화면 구조 분석
- *   FrontendAgent: Vue Router → 컴포넌트 → API 클라이언트 탐색
- *   BackendAgent : API 엔드포인트 → 컨트롤러 → 서비스 탐색
- *   DBAgent      : center/local DB 테스트 데이터 조회
- *   LeadAgent    : 모든 에이전트 결과 취합 → 테스트 케이스 도출
- *   RecordingAgent: 각 테스트 케이스를 브라우저에서 직접 레코딩
+ * 실행 구조 (2-Phase):
+ *   Phase 1 — 에이전트 팀 병렬 분석 (AgentBus 기반 실시간 에이전트 간 통신)
+ *     UIAgent      : DOM/화면 구조 분석. 조회 조건 데이터 필요 시 DB 에이전트에게 ask_agent
+ *     UISourceAgent: 3-tier 소스체인 탐색 (UI→BFF→Backend)
+ *     FrontendAgent: Vue Router → 컴포넌트 → API 클라이언트 탐색
+ *     BackendAgent : 컨트롤러/서비스 탐색. DB 에이전트 질의에 answer_query로 응답
+ *     DBAgent      : 테스트 데이터 조회. 테이블 모를 시 Backend에 ask_agent, UI 요청에 answer_query
+ *   Phase 2 — LeadAgent + RecordingAgent
+ *     LeadAgent    : 팀 결과 취합 → 테스트 케이스 도출
+ *     RecordingAgent: 각 테스트 케이스를 브라우저에서 직접 레코딩
+ *
+ * 에이전트 간 통신 (AgentBus):
+ *   ask_agent(target, question) → 대상 에이전트에게 실시간 질의 (응답 대기)
+ *   answer_query(query_id, answer) → 수신된 질의에 답변
+ *
+ *   예시 통신 흐름:
+ *     UIAgent → ask_agent("db", "날짜범위·상태코드 샘플 데이터 요청")
+ *     DBAgent → ask_agent("backend", "주문 테이블·상태코드 컬럼 확인")
+ *     BackendAgent → answer_query(id, "ORDER 테이블, STATUS_CD 컬럼...")
+ *     DBAgent → DB 조회 → answer_query(id, {dateRange: ..., statusCd: ...})
+ *     UIAgent ← 실제 조회 조건 데이터 수신
  *
  * 통신 프로토콜 (WebSocket → 클라이언트):
  *   analyze-started   { url }
@@ -485,13 +499,75 @@ let _sharedFindings = [];
 
 function resetFindings() { _sharedFindings = []; }
 
+// ── 에이전트 간 실시간 통신 버스 ────────────────────────────────────────────────
+class AgentBus {
+  constructor() {
+    this._inbox   = {};        // agentName → Array<{id, from, question}>
+    this._pending = new Map(); // queryId → {resolve, reject}
+    this._seq     = 0;
+  }
+  register(name) { this._inbox[name] = []; }
+  ask(from, to, question) {
+    return new Promise((resolve, reject) => {
+      const id = ++this._seq;
+      this._pending.set(id, { resolve, reject });
+      if (!this._inbox[to]) this._inbox[to] = [];
+      this._inbox[to].push({ id, from, question });
+    });
+  }
+  drain(name) {
+    const msgs = this._inbox[name] || [];
+    this._inbox[name] = [];
+    return msgs;
+  }
+  reply(id, answer) {
+    const p = this._pending.get(id);
+    if (p) { p.resolve(answer); this._pending.delete(id); }
+  }
+}
+
+const ASK_AGENT_TOOL = {
+  name: "ask_agent",
+  description: "다른 분석 에이전트에게 정보를 요청합니다. 상대방이 응답할 때까지 기다립니다.",
+  input_schema: {
+    type: "object",
+    properties: {
+      target: {
+        type: "string",
+        enum: ["ui", "ui-source", "frontend", "backend", "db"],
+        description: "대상 에이전트 이름",
+      },
+      question: { type: "string", description: "요청할 내용 (구체적으로 기술)" },
+    },
+    required: ["target", "question"],
+  },
+};
+
+const ANSWER_QUERY_TOOL = {
+  name: "answer_query",
+  description: "다른 에이전트의 질의에 답변합니다.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query_id: { type: "number", description: "질의 ID (질의 메시지에 포함된 값)" },
+      answer:   { type: "string", description: "답변 내용 (JSON 문자열 또는 텍스트)" },
+    },
+    required: ["query_id", "answer"],
+  },
+};
+
 /**
  * 범용 에이전트 루프
- * - send_finding: 중간 발견 즉시 전달 (웹소켓 + _sharedFindings)
+ * - send_finding   : 중간 발견 즉시 전달 (웹소켓 + _sharedFindings)
  * - report_findings: 최종 결과 제출 후 루프 종료
+ * - ask_agent      : (bus 제공 시) 다른 에이전트에게 실시간 질의
+ * - answer_query   : (bus 제공 시) 수신된 질의에 답변
  */
-async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurns = 40, execTool }) {
+async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurns = 40, execTool, bus }) {
   agentMsg(name, label, "start", "시작");
+
+  const busTools = bus ? [ASK_AGENT_TOOL, ANSWER_QUERY_TOOL] : [];
+  const allTools = [...tools, ...busTools];
   const messages = [{ role: "user", content: userMessage }];
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -501,33 +577,77 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       model: "claude-sonnet-4-6",
       max_tokens: 4096,
       system: systemPrompt,
-      tools,
+      tools: allTools,
       messages,
     });
     messages.push({ role: "assistant", content: response.content });
 
-    if (response.stop_reason === "end_turn" || !response.content.some((b) => b.type === "tool_use")) break;
+    const hasToolUse = response.content.some((b) => b.type === "tool_use");
+
+    if (response.stop_reason === "end_turn" || !hasToolUse) {
+      // end_turn 시에도 inbox 잔여 질의 처리
+      if (bus) {
+        const incoming = bus.drain(name);
+        if (incoming.length > 0) {
+          const queryText = incoming
+            .map((q) => `[질의 ID:${q.id}] ${q.from} 에이전트 요청:\n${q.question}`)
+            .join("\n\n");
+          messages.push({
+            role: "user",
+            content: `다른 에이전트 질의가 도착했습니다:\n${queryText}\n\nanswer_query 도구로 각 질의에 답변해주세요.`,
+          });
+          continue;
+        }
+      }
+      break;
+    }
 
     const toolResults = [];
+    let finished = false;
+
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
       if (state.analysisCancelled) throw new Error("분석 취소됨");
 
-      // ── send_finding: 즉시 전달 후 계속 ──
+      // ── send_finding ──
       if (block.name === "send_finding") {
         const { findingType, title, description, data } = block.input;
         findingMsg(name, label, findingType, title, description);
         _sharedFindings.push({ agent: name, label, findingType, title, description, data, ts: Date.now() });
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "finding received by lead agent" }] });
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "finding received" }] });
         continue;
       }
 
-      // ── report_findings: 최종 제출 후 루프 종료 ──
+      // ── report_findings ──
       if (block.name === "report_findings") {
-        agentMsg(name, label, "done", `분석 완료`);
+        agentMsg(name, label, "done", "분석 완료");
         toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "findings submitted" }] });
         messages.push({ role: "user", content: toolResults });
+        finished = true;
         return block.input.findings || {};
+      }
+
+      // ── ask_agent: 다른 에이전트에게 질의 (응답 대기) ──
+      if (block.name === "ask_agent" && bus) {
+        const { target, question } = block.input;
+        agentMsg(name, label, "progress", `→ [${target}] 질의: ${question.slice(0, 80)}`);
+        try {
+          const answer = await bus.ask(name, target, question);
+          agentMsg(name, label, "progress", `← [${target}] 응답 수신`);
+          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: String(answer) }] });
+        } catch (e) {
+          toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: `오류: ${e.message}` }], is_error: true });
+        }
+        continue;
+      }
+
+      // ── answer_query: 수신된 질의에 답변 ──
+      if (block.name === "answer_query" && bus) {
+        const { query_id, answer } = block.input;
+        bus.reply(query_id, answer);
+        agentMsg(name, label, "progress", `↩ 질의 ${query_id} 답변 전송`);
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "답변 전송됨" }] });
+        continue;
       }
 
       // ── 일반 도구 실행 ──
@@ -547,7 +667,24 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       }
       toolResults.push({ type: "tool_result", tool_use_id: block.id, content });
     }
-    messages.push({ role: "user", content: toolResults });
+
+    if (finished) break;
+
+    // 도구 결과 전송 + inbox 잔여 질의 병합
+    const userContent = [...toolResults];
+    if (bus) {
+      const incoming = bus.drain(name);
+      if (incoming.length > 0) {
+        const queryText = incoming
+          .map((q) => `[질의 ID:${q.id}] ${q.from} 에이전트 요청:\n${q.question}`)
+          .join("\n\n");
+        userContent.push({
+          type: "text",
+          text: `\n\n다른 에이전트 질의:\n${queryText}\n\nanswer_query 도구로 각 질의에 답변해주세요.`,
+        });
+      }
+    }
+    messages.push({ role: "user", content: userContent });
   }
 
   agentMsg(name, label, "done", "완료");
@@ -559,9 +696,10 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
 // ════════════════════════════════════════════════════════════════════════════
 
 // ── 1. UI 에이전트 ───────────────────────────────────────────────────────────
-async function runUIAgent(url, pageSource) {
+async function runUIAgent(url, pageSource, bus) {
   return runAgent({
     name: "ui", label: "UI 분석",
+    bus,
     tools: [
       {
         name: "browser_get_page_info",
@@ -585,13 +723,20 @@ async function runUIAgent(url, pageSource) {
 3. 발견사항마다 send_finding 호출 (폼 필드, 버튼 역할, 화면 목적 등)
 4. 분석 완료 후 report_findings 호출
 
+에이전트 협업 (ask_agent 도구 활용):
+- 조회 화면에서 실제 조회 조건 데이터가 필요하면 DB 에이전트에게 요청하세요.
+  예: ask_agent("db", "주문 목록 조회 화면의 테스트 데이터가 필요합니다. 조회 조건: 날짜범위, 상태코드. 유효한 샘플 값을 제공해주세요.")
+- DB 에이전트가 응답하면 그 데이터를 send_finding에 포함하고 실제 조회 가능한 케이스에 활용하세요.
+- 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
+
 report_findings 포함 내용:
 - pageTitle: 페이지 제목
 - purpose: 이 페이지의 역할 (1-2문장)
 - formFields: [{id, name, type, label, placeholder, required}]
 - buttons: [{label, type, role}]
 - sections: 주요 화면 섹션 목록
-- userActions: 사용자가 할 수 있는 주요 액션 목록`,
+- userActions: 사용자가 할 수 있는 주요 액션 목록
+- testData: DB 에이전트로부터 받은 실제 조회 조건 데이터 (있을 경우)`,
     userMessage: `현재 URL: ${url}
 
 현재 페이지 HTML (일부):
@@ -627,7 +772,7 @@ UI를 분석하여 발견사항을 send_finding으로 전달하고, 완료 후 r
 // 한 레벨에 여러 엔드포인트가 있으면 각각의 프로젝트를 병렬로 따라가도록
 // 에이전트에게 지시한다 (실제 LLM 의 도구 호출은 직렬이지만 모든 엔드포인트를
 // 검사하도록 강제).
-async function runUISourceAgent(url) {
+async function runUISourceAgent(url, bus) {
   if (!gitlab.isReady()) {
     agentMsg("ui-source", "UI 소스 분석", "done", "GitLab 미설정 — 스킵");
     return { skipped: true, levels: [], apiEndpoints: [] };
@@ -649,6 +794,7 @@ async function runUISourceAgent(url) {
 
   return runAgent({
     name: "ui-source", label: "UI 소스 분석",
+    bus,
     tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 3-tier 웹 시스템의 소스코드를 가로지르며 분석하는 에이전트입니다.
 
@@ -710,7 +856,7 @@ async function runUISourceAgent(url) {
 }
 
 // ── 2. Frontend 에이전트 ──────────────────────────────────────────────────────
-async function runFrontendAgent(url) {
+async function runFrontendAgent(url, bus) {
   if (!gitlab.isConfigured()) {
     agentMsg("frontend", "Frontend 분석", "done", "GitLab 미설정 — 스킵");
     return { skipped: true, apiEndpoints: [], validationRules: [] };
@@ -719,6 +865,7 @@ async function runFrontendAgent(url) {
 
   return runAgent({
     name: "frontend", label: "Frontend 분석",
+    bus,
     tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 Vue.js 프론트엔드 소스 분석 에이전트입니다.
 현재 URL 경로에 해당하는 Vue 컴포넌트를 추적하여 UI→API까지 분석합니다.
@@ -738,6 +885,8 @@ async function runFrontendAgent(url) {
 - 유효성 검증 규칙 발견 → findingType: "validation_rule"
 - 비즈니스 로직 발견 → findingType: "business_logic"
 
+에이전트 협업: 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
+
 report_findings 포함:
 - routerFile, componentFile: 파일 경로
 - componentFiles: 읽은 모든 파일 목록
@@ -754,19 +903,36 @@ Vue Router에서 이 경로의 컴포넌트를 찾아 UI→API까지 추적하�
 }
 
 // ── 3. Backend 에이전트 ───────────────────────────────────────────────────────
-async function runBackendAgent(frontendFindings) {
+async function runBackendAgent(frontendFindings, bus, url) {
   if (!gitlab.isConfigured()) {
     agentMsg("backend", "Backend 분석", "done", "GitLab 미설정 — 스킵");
     return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
   }
   const endpoints = frontendFindings.apiEndpoints || [];
-  if (!endpoints.length) {
+  // 팀 모드(bus 있음): 엔드포인트 없어도 URL로 시작, 질의 응답 대기
+  // 단독 모드(bus 없음): 엔드포인트 없으면 스킵
+  if (!bus && !endpoints.length) {
     agentMsg("backend", "Backend 분석", "done", "API 엔드포인트 없음 — 스킵");
     return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
   }
 
+  const userMessage = endpoints.length
+    ? `Frontend 분석 결과 (API 엔드포인트):
+\`\`\`json
+${JSON.stringify({ apiEndpoints: endpoints, validationRules: frontendFindings.validationRules || [] }, null, 2).slice(0, 4000)}
+\`\`\`
+
+각 엔드포인트의 백엔드 컨트롤러/서비스를 찾아 분석하고,
+발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`
+    : `분석 대상 URL: ${url || "알 수 없음"}
+
+Frontend 에이전트가 아직 엔드포인트를 제공하지 않았습니다.
+URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
+다른 에이전트의 질의(answer_query)에 응답하면서 report_findings를 호출하세요.`;
+
   return runAgent({
     name: "backend", label: "Backend 분석",
+    bus,
     tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 백엔드 소스 분석 에이전트입니다.
 프론트엔드 에이전트가 발견한 API 엔드포인트를 바탕으로 백엔드 컨트롤러/서비스를 분석합니다.
@@ -785,6 +951,11 @@ async function runBackendAgent(frontendFindings) {
 - 에러 시나리오 → findingType: "error_scenario"
 - 비즈니스 로직 → findingType: "business_logic"
 
+에이전트 협업 (팀 모드):
+- DB 에이전트나 UI 에이전트로부터 질의가 도착하면 answer_query로 즉시 답변하세요.
+  예: DB 에이전트가 "주문 테이블의 상태코드 컬럼명을 알려주세요" 질의 → 소스 확인 후 답변
+- Frontend 에이전트에게 ask_agent로 엔드포인트 정보를 요청할 수도 있습니다.
+
 report_findings 포함:
 - controllerFiles: 읽은 컨트롤러 파일 목록
 - businessLogic: [{endpoint, description, conditions, errors}]
@@ -792,19 +963,13 @@ report_findings 포함:
 - authRules: 권한/인증 조건 목록
 - errorScenarios: [{condition, errorMessage, httpStatus}]
 - testScenarios: [{name, description, requiredData, expectedResult}]`,
-    userMessage: `Frontend 분석 결과 (API 엔드포인트):
-\`\`\`json
-${JSON.stringify({ apiEndpoints: endpoints, validationRules: frontendFindings.validationRules || [] }, null, 2).slice(0, 4000)}
-\`\`\`
-
-각 엔드포인트의 백엔드 컨트롤러/서비스를 찾아 분석하고,
-발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`,
+    userMessage,
     execTool: execGitlab,
   });
 }
 
 // ── 4. DB 에이전트 ────────────────────────────────────────────────────────────
-async function runDBAgent(frontendFindings, backendFindings) {
+async function runDBAgent(frontendFindings, backendFindings, bus, url) {
   const configuredDbs = db.configuredDbs();
   if (!configuredDbs.length) {
     agentMsg("db", "DB 분석", "done", "DB 미설정 — 스킵");
@@ -814,8 +979,27 @@ async function runDBAgent(frontendFindings, backendFindings) {
   const dbTables = backendFindings.dbTables || [];
   const entityHints = (frontendFindings.apiEndpoints || []).map((e) => e.path).join(", ");
 
+  const userMessage = dbTables.length
+    ? `Backend 분석 결과 (사용 테이블):
+\`\`\`json
+${JSON.stringify(dbTables, null, 2).slice(0, 3000)}
+\`\`\`
+
+API 경로 힌트: ${entityHints}
+설정된 DB: ${configuredDbs.join(", ")}
+
+테스트 데이터를 조회하고 report_findings를 호출하세요.`
+    : `분석 대상 URL: ${url || "알 수 없음"}
+설정된 DB: ${configuredDbs.join(", ")}
+
+Backend 에이전트가 아직 테이블 정보를 제공하지 않았습니다.
+ask_agent("backend", "...")로 관련 DB 테이블과 쿼리 정보를 문의하세요.
+또한 UI 에이전트로부터 조회 조건 데이터 요청이 오면 answer_query로 응답하세요.
+필요한 정보를 수집한 후 테스트 데이터를 조회하고 report_findings를 호출하세요.`;
+
   return runAgent({
     name: "db", label: "DB 분석",
+    bus,
     tools: [...buildDbTools(configuredDbs), SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 DB 데이터 분석 에이전트입니다.
 테스트에 사용할 실제 데이터를 DB에서 조회합니다.
@@ -830,26 +1014,60 @@ DB 용도:
 3. 경계값 데이터 확인 (빈 결과, 최대값 등)
 4. 설정된 DB가 여러 개면 모두 조회
 
+에이전트 협업 (팀 모드):
+- 테이블 정보를 모르면 ask_agent("backend", "...")로 Backend 에이전트에게 문의하세요.
+  예: ask_agent("backend", "주문 목록에 사용되는 DB 테이블명과 상태코드 컬럼을 알려주세요.")
+- UI 에이전트로부터 조회 조건 데이터 요청이 오면 answer_query로 실제 샘플 데이터를 제공하세요.
+  예: UI가 "날짜범위, 상태코드 샘플 데이터 요청" → DB 조회 후 answer_query로 전달
+- 다른 에이전트의 질의에 우선 응답한 후 자신의 분석도 완료하세요.
+
 데이터 발견 시 send_finding 호출 (findingType: "db_table")
 
 report_findings 포함:
 - testData: {[테이블명]: [샘플 rows]}
 - validIds: {[용도]: 값} (예: {"userId": 123, "deptCode": "A01"})
 - summary: 확보한 테스트 데이터 요약`,
-    userMessage: `Backend 분석 결과 (사용 테이블):
-\`\`\`json
-${JSON.stringify(dbTables, null, 2).slice(0, 3000)}
-\`\`\`
-
-API 경로 힌트: ${entityHints}
-설정된 DB: ${configuredDbs.join(", ")}
-
-테스트 데이터를 조회하고 report_findings를 호출하세요.`,
+    userMessage,
     execTool: execDb,
   });
 }
 
-// ── 5. Lead 에이전트 — 취합 및 테스트케이스 도출 ─────────────────────────────
+// ── 에이전트 팀 — Phase 1+2 병렬 실행 + 실시간 에이전트 간 통신 ─────────────────
+async function runAgentTeam(url, pageSource) {
+  const bus = new AgentBus();
+  ["ui", "ui-source", "frontend", "backend", "db"].forEach((n) => bus.register(n));
+
+  phaseMsg(1, 2, "에이전트 팀 병렬 분석 (UI · 소스 · Frontend · Backend · DB)");
+
+  const settled = await Promise.allSettled([
+    runUIAgent(url, pageSource, bus)
+      .catch((e) => { agentMsg("ui",        "UI 분석",        "error", e.message); return {}; }),
+    runUISourceAgent(url, bus)
+      .catch((e) => { agentMsg("ui-source", "UI 소스 분석",   "error", e.message); return {}; }),
+    runFrontendAgent(url, bus)
+      .catch((e) => { agentMsg("frontend",  "Frontend 분석",  "error", e.message); return {}; }),
+    runBackendAgent({ apiEndpoints: [] }, bus, url)
+      .catch((e) => { agentMsg("backend",   "Backend 분석",   "error", e.message); return {}; }),
+    runDBAgent({ apiEndpoints: [] }, { dbTables: [] }, bus, url)
+      .catch((e) => { agentMsg("db",        "DB 분석",        "error", e.message); return {}; }),
+  ]);
+
+  const [uiF, uiSourceF, frontendF, backendF, dbF] = settled.map((r) =>
+    r.status === "fulfilled" ? (r.value || {}) : {}
+  );
+
+  // UISource에서 찾은 apiEndpoints를 Frontend 결과에 병합
+  if (uiSourceF?.apiEndpoints?.length) {
+    frontendF.apiEndpoints = [
+      ...(frontendF.apiEndpoints || []),
+      ...uiSourceF.apiEndpoints,
+    ];
+  }
+
+  return { uiF, uiSourceF, frontendF, backendF, dbF };
+}
+
+// ── Lead 에이전트 — 취합 및 테스트케이스 도출 ────────────────────────────────
 async function runLeadAgent(url, uiF, frontendF, backendF, dbF) {
   agentMsg("lead", "리드 에이전트", "start", "전체 분석 결과 취합 중");
 
@@ -989,55 +1207,14 @@ async function runAnalysis(url) {
     let pageSource = "";
     try { pageSource = await state.activePage.evaluate(() => document.documentElement.outerHTML); } catch {}
 
-    // ── Phase 1: UI 분석 (DOM) ───────────────────────────────────────────
-    phaseMsg(1, 5, "UI 분석 (DOM/화면 구조)");
-    const uiFindings = await runUIAgent(url, pageSource)
-      .catch((e) => { agentMsg("ui", "UI 분석", "error", e.message); return {}; });
+    // ── Phase 1: 에이전트 팀 병렬 분석 (UI · 소스 · Frontend · Backend · DB) ──
+    const { uiF, frontendF, backendF, dbF } = await runAgentTeam(url, pageSource);
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
-    // ── Phase 2: UI 소스 분석 (3-tier 체인) ──────────────────────────────
-    // 페이지 origin 다음 세그먼트 = 프로젝트로 잡고 Vue 컴포넌트부터
-    // 중간 계층 / 백엔드 계층까지 소스코드를 따라가며 API 엔드포인트와
-    // 비즈니스 로직을 수집한다. CLAUDE.md 매핑표에서 브랜치 조회.
-    phaseMsg(2, 5, "UI 소스 분석 (3-tier 체인)");
-    const uiSourceFindings = await runUISourceAgent(url)
-      .catch((e) => { agentMsg("ui-source", "UI 소스 분석", "error", e.message); return {}; });
-
-    if (state.analysisCancelled) throw new Error("취소됨");
-
-    // ── Phase 3: Frontend 분석 (기존 — GITLAB_PROJECT env 기반) ─────────
-    phaseMsg(3, 5, "Frontend 소스 분석");
-    const frontendFindings = await runFrontendAgent(url)
-      .catch((e) => { agentMsg("frontend", "Frontend 분석", "error", e.message); return {}; });
-
-    // UI 소스 에이전트가 찾은 endpoint 를 Frontend 결과에 병합해 두면
-    // 후속 Backend / DB 분석이 더 풍부한 입력을 받는다.
-    if (uiSourceFindings && Array.isArray(uiSourceFindings.apiEndpoints)) {
-      const merged = [
-        ...(frontendFindings.apiEndpoints || []),
-        ...uiSourceFindings.apiEndpoints,
-      ];
-      frontendFindings.apiEndpoints = merged;
-    }
-
-    if (state.analysisCancelled) throw new Error("취소됨");
-
-    // ── Phase 4: Backend 분석 (Frontend 결과 활용) ───────────────────────
-    phaseMsg(4, 5, "Backend 소스 분석");
-    const backendFindings = await runBackendAgent(frontendFindings)
-      .catch((e) => { agentMsg("backend", "Backend 분석", "error", e.message); return {}; });
-
-    if (state.analysisCancelled) throw new Error("취소됨");
-
-    // ── Phase 5: DB 분석 + Lead 취합 + 레코딩 ────────────────────────────
-    phaseMsg(5, 5, "DB 데이터 분석 → 테스트 케이스 도출 → 레코딩");
-    const dbFindings = await runDBAgent(frontendFindings, backendFindings)
-      .catch((e) => { agentMsg("db", "DB 분석", "error", e.message); return {}; });
-
-    if (state.analysisCancelled) throw new Error("취소됨");
-
-    const testCases = await runLeadAgent(url, uiFindings, frontendFindings, backendFindings, dbFindings);
+    // ── Phase 2: Lead 에이전트 취합 → 테스트 케이스 도출 → 레코딩 ─────────────
+    phaseMsg(2, 2, "테스트 케이스 도출 → 레코딩");
+    const testCases = await runLeadAgent(url, uiF, frontendF, backendF, dbF);
 
     for (let i = 0; i < testCases.length; i++) {
       if (state.analysisCancelled) break;
