@@ -1258,11 +1258,28 @@ async function runRecordingAgent(tc, index, total) {
     name: "recording",
     label: `레코딩 ${index + 1}/${total}`,
     tools: [...BROWSER_TOOLS, REPORT_TOOL],
-    systemPrompt: `테스트 케이스를 브라우저에서 순서대로 실행. 주요 액션 전후 browser_screenshot. 완료 시 report_findings({ "completed": true, "summary": "결과" }).`,
+    systemPrompt: `당신은 브라우저에서 테스트 케이스를 직접 실행하는 레코딩 에이전트입니다.
+
+단계별 도구 매핑:
+- navigate  → browser_navigate(url)
+- click     → browser_click(selector, label)
+- type      → browser_type(selector, text)
+- key       → browser_key_press(key)
+- scroll    → browser_scroll(x, y)
+- screenshot → browser_screenshot()
+
+모든 단계를 순서대로 빠짐없이 browser 도구를 사용해 실행하세요. 주요 액션 전후 browser_screenshot으로 상태 확인.
+완료 후 report_findings({ "completed": true, "summary": "결과" }).`,
     userMessage: `[${index + 1}/${total}] ${tc.name}
 예상결과: ${tc.expectedResult || ""}
-단계: ${JSON.stringify(tc.steps)}
-데이터: ${JSON.stringify(tc.testData || {})}`,
+
+실행 단계:
+${JSON.stringify(tc.steps, null, 2)}
+
+사용 데이터:
+${JSON.stringify(tc.testData || {}, null, 2)}
+
+위 단계를 순서대로 실행하세요.`,
     execTool: execBrowser,
     maxTurns: 30,
   });
