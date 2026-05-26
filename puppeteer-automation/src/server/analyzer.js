@@ -860,6 +860,12 @@ async function runUIAgent(url, pageSource, bus) {
 - DB 에이전트가 응답하면 그 데이터를 send_finding에 포함하고 실제 조회 가능한 케이스에 활용하세요.
 - 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
 
+
+테스트 데이터 확인 (write_report 전 필수):
+소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
+  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
+DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
+(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
 분석 완료 후 순서:
 1. write_report 도구로 마크다운 리포트 작성 (형식 예시):
    # UI 분석 리포트
@@ -868,6 +874,7 @@ async function runUIAgent(url, pageSource, bus) {
    ## 사용자 액션
    ## 테스트 데이터 (DB 에이전트 응답 포함)
    ## 테스트 관점 메모
+   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
 2. report_findings 도구로 구조화 JSON 제출:
    - pageTitle, purpose, formFields, buttons, sections, userActions, testData`,
     userMessage: `현재 URL: ${url}
@@ -896,7 +903,7 @@ UI를 분석하여 발견사항을 send_finding으로 전달하고, 완료 후 r
     },
   });
 }
- ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────
 // 페이지 origin 다음 첫 path 세그먼트를 GitLab 프로젝트로 삼아 3-level chain
 // (UI 프로젝트 → 중간 static-spring 프로젝트 → backend 프로젝트) 을 따라간다.
 //
@@ -967,6 +974,12 @@ async function runUISourceAgent(url, bus) {
 3. 컨트롤러 → 서비스 → 매퍼/리포지토리 추적
 4. 비즈니스 로직 / DB 테이블 / 권한 / 에러 시나리오 → send_finding 으로 적시 전달
 
+
+테스트 데이터 확인 (write_report 전 필수):
+소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
+  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
+DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
+(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
 종료:
 1. write_report 도구로 마크다운 리포트 작성:
    # UI 소스 분석 리포트
@@ -975,6 +988,7 @@ async function runUISourceAgent(url, bus) {
    ## Level 2: 백엔드 계층 (컨트롤러, 서비스, DB 테이블)
    ## 전체 API 엔드포인트 목록
    ## 비즈니스 로직 요약
+   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
 2. report_findings 호출. findings 포함 내용:
    {
      levels: [
@@ -1040,6 +1054,12 @@ async function runFrontendAgent(url, bus) {
 
 에이전트 협업: 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
 
+
+테스트 데이터 확인 (write_report 전 필수):
+소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
+  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
+DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
+(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
 분석 완료 후 순서:
 1. write_report 도구로 마크다운 리포트 작성:
    # Frontend 분석 리포트
@@ -1048,6 +1068,7 @@ async function runFrontendAgent(url, bus) {
    ## 유효성 검증 규칙
    ## 폼 필드 목록
    ## 비즈니스 로직
+   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
 2. report_findings 도구로 구조화 JSON 제출:
    - routerFile, componentFile, componentFiles, apiEndpoints, validationRules, formFields, businessLogic`,
     userMessage: `현재 페이지 URL: ${url} (경로: ${urlPath})
@@ -1132,6 +1153,12 @@ URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
   예: DB 에이전트가 "주문 테이블의 상태코드 컬럼명을 알려주세요" 질의 → 소스 확인 후 답변
 - Frontend 에이전트에게 ask_agent로 엔드포인트 정보를 요청할 수도 있습니다.
 
+
+테스트 데이터 확인 (write_report 전 필수):
+소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
+  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
+DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
+(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
 분석 완료 후 순서:
 1. write_report 도구로 마크다운 리포트 작성:
    # Backend 분석 리포트
@@ -1141,6 +1168,7 @@ URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
    ## 비즈니스 로직 (조건, 분기, 에러 처리)
    ## 권한/인증 규칙
    ## 테스트 시나리오 제안
+   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
 2. report_findings 도구로 구조화 JSON 제출:
    - controllerFiles, businessLogic, dbTables, authRules, errorScenarios, testScenarios`,
     userMessage,
@@ -1195,25 +1223,27 @@ DB 용도:
 3. 경계값 데이터 확인 (빈 결과, 최대값 등)
 4. 설정된 DB가 여러 개면 모두 조회
 
-에이전트 협업 (팀 모드):
-- 테이블 정보를 모르면 ask_agent("backend", "...")로 Backend 에이전트에게 문의하세요.
-  예: ask_agent("backend", "주문 목록에 사용되는 DB 테이블명과 상태코드 컬럼을 알려주세요.")
-- UI 에이전트로부터 조회 조건 데이터 요청이 오면 answer_query로 실제 샘플 데이터를 제공하세요.
-  예: UI가 "날짜범위, 상태코드 샘플 데이터 요청" → DB 조회 후 answer_query로 전달
-- 다른 에이전트의 질의에 우선 응답한 후 자신의 분석도 완료하세요.
+에이전트 협업 (팀 모드) — 핵심 역할:
+- UI, UISource, Frontend, Backend 에이전트가 테스트 케이스 검증 데이터를 요청합니다.
+  요청이 도착하면 반드시 실제 db_query를 실행하여 결과를 answer_query로 전달하세요.
+  (자동응답/빈 응답 금지. 모르는 테이블이면 먼저 ask_agent("backend", ...)로 테이블명 확인)
+  예: "주문 조회 테스트 데이터 요청" → db_query로 ORDER 테이블 샘플 SELECT → answer_query로 결과 전달
+- 각 에이전트 질의에 우선 응답한 후 자신의 분析도 완료하세요.
+- 루프 동안 answer_query 처리를 여러 번 수행할 수 있습니다. 모든 질의에 응답하세요.
 
 데이터 발견 시 send_finding 호출 (findingType: "db_table")
 
-분석 완료 후 순서:
+분析 완료 후 순서:
 1. write_report 도구로 마크다운 리포트 작성:
-   # DB 분석 리포트
+   # DB 분析 리포트
    ## 조회한 테이블 목록
    ## 샘플 데이터 (테이블별)
    ## 유효 ID/코드 목록 (테스트에 사용 가능한 값)
    ## 경계값 데이터 (빈 결과, 최대값 등)
+   ## 에이전트별 테스트 데이터 요청 처리 내역 (어느 에이전트에게 어떤 데이터를 제공했는지)
    ## 테스트 데이터 활용 가이드
 2. report_findings 도구로 구조화 JSON 제출:
-   - testData, validIds, summary`,
+   - testData, validIds, agentDataProvided, summary`,
     userMessage,
     execTool: execDb,
   });
