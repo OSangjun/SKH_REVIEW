@@ -807,17 +807,6 @@
     if (!bubble) return;
     const agent = row.dataset.agent;
 
-    // 다른 에이전트의 말풍선은 즉시 숨김 (한 번에 하나만 표시)
-    ovAgents.querySelectorAll('.ov-agent-bubble:not(.hidden)').forEach(b => {
-      const otherAgent = b.closest('.ov-agent-row')?.dataset.agent;
-      if (otherAgent === agent) return;
-      clearTimeout((_bubbleTimers[otherAgent] || {}).fade);
-      clearTimeout((_bubbleTimers[otherAgent] || {}).show);
-      b.className = 'ov-agent-bubble hidden';
-      b.textContent = '';
-      delete _bubbleTimers[otherAgent];
-    });
-
     // 기존 타이머 제거
     if (_bubbleTimers[agent]) {
       clearTimeout(_bubbleTimers[agent].fade);
