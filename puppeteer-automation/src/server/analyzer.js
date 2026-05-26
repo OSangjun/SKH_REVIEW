@@ -356,13 +356,29 @@ async function execGitlab(name, input) {
   }
 }
 
+// SELECT 쿼리에 LIMIT 100 을 강제 적용한다.
+// - LIMIT 없음 → " LIMIT 100" 추가
+// - LIMIT N (N>100) → LIMIT 100 으로 대체
+// - LIMIT offset, count (MySQL) → count 부분을 100 이하로 제한
+function enforceSqlLimit(sql, maxRows = 100) {
+  sql = sql.replace(/;\s*$/, "").trim();
+  if (!/\bLIMIT\b/i.test(sql)) return `${sql} LIMIT ${maxRows}`;
+  return sql.replace(/\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?/gi, (_, n1, n2) => {
+    if (n2 !== undefined) {
+      return `LIMIT ${n1}, ${Math.min(parseInt(n2, 10), maxRows)}`;
+    }
+    return `LIMIT ${Math.min(parseInt(n1, 10), maxRows)}`;
+  });
+}
+
 async function execDb(name, input) {
   if (name !== "db_query") return { error: `알 수 없는 도구: ${name}` };
-  const sql = (input.sql || "").trim();
-  if (!/^select/i.test(sql)) return { error: "SELECT 쿼리만 허용됩니다." };
+  const raw = (input.sql || "").trim();
+  if (!/^select/i.test(raw)) return { error: "SELECT 쿼리만 허용됩니다." };
+  const sql    = enforceSqlLimit(raw);      // 항상 LIMIT 100 이하 보장
   const dbName = input.db || "local";
-  const rows = await db.query(sql, input.params || [], dbName);
-  return { rows, count: rows.length, db: dbName };
+  const rows   = await db.query(sql, input.params || [], dbName);
+  return { rows, count: rows.length, db: dbName, appliedSql: sql };
 }
 
 // ── 레코딩 상태 ─────────────────────────────────────────────────────────────
@@ -1151,6 +1167,8 @@ URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
 에이전트 협업 (팀 모드):
 - DB 에이전트나 UI 에이전트로부터 질의가 도착하면 answer_query로 즉시 답변하세요.
   예: DB 에이전트가 "주문 테이블의 상태코드 컬럼명을 알려주세요" 질의 → 소스 확인 후 답변
+- DB 에이전트가 소스코드 내 SQL/JPQL/마이바티스 쿼리 전체를 요청하면, 관련 파일에서 쿼리를 추출하여 답변하세요.
+  포함 항목: SELECT/INSERT/UPDATE/DELETE 쿼리, 프로시저·함수 호출, 사용 테이블명, 파라미터
 - Frontend 에이전트에게 ask_agent로 엔드포인트 정보를 요청할 수도 있습니다.
 
 
@@ -1189,61 +1207,75 @@ async function runDBAgent(frontendFindings, backendFindings, bus, url) {
   const entityHints = (frontendFindings.apiEndpoints || []).map((e) => e.path).join(", ");
 
   const userMessage = dbTables.length
-    ? `Backend 분석 결과 (사용 테이블):
+    ? `Backend 분析 결과 (참고용 테이블 힌트):
 \`\`\`json
-${JSON.stringify(dbTables, null, 2).slice(0, 3000)}
+${JSON.stringify(dbTables, null, 2).slice(0, 2000)}
 \`\`\`
 
 API 경로 힌트: ${entityHints}
 설정된 DB: ${configuredDbs.join(", ")}
 
-테스트 데이터를 조회하고 report_findings를 호출하세요.`
-    : `분석 대상 URL: ${url || "알 수 없음"}
+⚠️ 위 테이블 힌트는 참고용입니다.
+Step 1 지시대로 먼저 ask_agent("backend", ...) 로 실제 소스코드 내 쿼리를 수집한 후,
+쿼리에서 사용하는 테이블·프로시저를 분析하고 샘플 데이터를 조회하세요.
+모든 SELECT는 자동으로 LIMIT 100 이하로 제한됩니다.`
+    : `분析 대상 URL: ${url || "알 수 없음"}
 설정된 DB: ${configuredDbs.join(", ")}
 
-Backend 에이전트가 아직 테이블 정보를 제공하지 않았습니다.
-ask_agent("backend", "...")로 관련 DB 테이블과 쿼리 정보를 문의하세요.
-또한 UI 에이전트로부터 조회 조건 데이터 요청이 오면 answer_query로 응답하세요.
-필요한 정보를 수집한 후 테스트 데이터를 조회하고 report_findings를 호출하세요.`;
+Step 1 지시대로 먼저 ask_agent("backend", ...) 로 소스코드 내 SQL/JPQL/마이바티스 쿼리를 수집하세요.
+수집한 쿼리에서 테이블·프로시저를 파악한 뒤 샘플 데이터를 조회하고 report_findings를 호출하세요.
+모든 SELECT는 자동으로 LIMIT 100 이하로 제한됩니다.`;
 
   return runAgent({
     name: "db", label: "DB 분석",
     bus,
     tools: [...buildDbTools(configuredDbs), SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
-    systemPrompt: `당신은 DB 데이터 분석 에이전트입니다.
-테스트에 사용할 실제 데이터를 DB에서 조회합니다.
+    systemPrompt: `당신은 DB 데이터 분析 에이전트입니다.
+백엔드 소스코드에 포함된 실제 쿼리를 기반으로 DB 구조를 파악하고,
+테스트 검증에 필요한 샘플 데이터를 조회합니다.
 
-DB 용도:
-- center DB: 공통코드, 권한, 마스터 데이터 (조직코드, 분류코드 등)
-- local DB: 업무/도메인 데이터 (사용자, 계정, 거래, 업무 데이터 등)
+## 분析 절차
 
-조회 전략:
-1. 백엔드에서 사용하는 테이블에서 샘플 데이터 SELECT (LIMIT 5)
-2. 테스트에 필요한 유효한 ID/코드값 확보
-3. 경계값 데이터 확인 (빈 결과, 최대값 등)
-4. 설정된 DB가 여러 개면 모두 조회
+### Step 1 — 백엔드 쿼리 수집 (분析 시작 즉시)
+ask_agent("backend",
+  "이 화면 관련 백엔드 소스코드에 포함된 SQL/JPQL/마이바티스 XML 쿼리를 모두 알려주세요.
+   포함 항목: SELECT/INSERT/UPDATE/DELETE 쿼리, 프로시저·함수 호출, 사용 테이블명, 조인 관계")
 
-에이전트 협업 (팀 모드) — 핵심 역할:
-- UI, UISource, Frontend, Backend 에이전트가 테스트 케이스 검증 데이터를 요청합니다.
-  요청이 도착하면 반드시 실제 db_query를 실행하여 결과를 answer_query로 전달하세요.
-  (자동응답/빈 응답 금지. 모르는 테이블이면 먼저 ask_agent("backend", ...)로 테이블명 확인)
-  예: "주문 조회 테스트 데이터 요청" → db_query로 ORDER 테이블 샘플 SELECT → answer_query로 결과 전달
-- 각 에이전트 질의에 우선 응답한 후 자신의 분析도 완료하세요.
-- 루프 동안 answer_query 처리를 여러 번 수행할 수 있습니다. 모든 질의에 응답하세요.
+### Step 2 — 쿼리 분析
+수신한 쿼리에서:
+- 사용 테이블 목록 추출
+- 프로시저/함수 호출 여부 확인
+  → 프로시저/함수 존재 시 정의 조회 (information_schema.ROUTINES 또는 해당 DB 카탈로그)
+- 테이블 간 조인 관계 파악
+- WHERE 조건에 사용된 컬럼·코드값 파악
+
+### Step 3 — 샘플 데이터 조회
+⚠️ 중요: 모든 SELECT는 시스템이 자동으로 LIMIT 100 이하로 강제합니다.
+전체 데이터 추출 절대 금지. 유효 ID/코드값, 경계값(빈 결과·최대값) 위주 조회.
+
+### Step 4 — 다른 에이전트 질의 응답
+UI/UISource/Frontend/Backend 에이전트가 테스트 데이터를 요청하면:
+- 반드시 실제 db_query 결과로 answer_query 응답 (자동응답/빈응답 금지)
+- 모르는 테이블은 ask_agent("backend", ...) 로 재확인 후 조회
+
+## DB 용도
+- center DB: 공통코드, 권한, 마스터 데이터
+- local DB: 업무/도메인 데이터 (거래, 계정, 사용자 등)
 
 데이터 발견 시 send_finding 호출 (findingType: "db_table")
 
 분析 완료 후 순서:
 1. write_report 도구로 마크다운 리포트 작성:
-   # DB 분析 리포트
-   ## 조회한 테이블 목록
-   ## 샘플 데이터 (테이블별)
+   # DB 分析 리포트
+   ## 백엔드 수집 쿼리 목록 (원본)
+   ## 사용 테이블 목록 및 구조
+   ## 프로시저/함수 목록 및 정의
+   ## 샘플 데이터 (테이블별, 최대 100건)
    ## 유효 ID/코드 목록 (테스트에 사용 가능한 값)
-   ## 경계값 데이터 (빈 결과, 최대값 등)
-   ## 에이전트별 테스트 데이터 요청 처리 내역 (어느 에이전트에게 어떤 데이터를 제공했는지)
+   ## 에이전트별 테스트 데이터 요청 처리 내역
    ## 테스트 데이터 활용 가이드
 2. report_findings 도구로 구조화 JSON 제출:
-   - testData, validIds, agentDataProvided, summary`,
+   - collectedQueries, tables, procedures, testData, validIds, agentDataProvided, summary`,
     userMessage,
     execTool: execDb,
   });
