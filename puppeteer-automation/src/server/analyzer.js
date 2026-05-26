@@ -505,12 +505,20 @@ class AgentBus {
     this._inbox   = {};        // agentName → Array<{id, from, question}>
     this._pending = new Map(); // queryId → {resolve, reject}
     this._seq     = 0;
+    this._closed  = new Map(); // agentName → label (종료된 에이전트 추적)
   }
   register(name) { this._inbox[name] = []; }
 
-  // [fix] 90초 타임아웃: 대상 에이전트가 먼저 종료돼도 무한 대기하지 않음
   ask(from, to, question, timeoutMs = 90000) {
     return new Promise((resolve, reject) => {
+      // 대상 에이전트가 이미 종료된 경우 즉시 응답 (90초 대기 없음)
+      if (this._closed.has(to)) {
+        const label = this._closed.get(to);
+        agentMsg(from, from, "progress", `↩ [즉시] ${to} 에이전트 이미 종료 — 자동 응답`);
+        resolve(`[${label} 분석이 완료되어 질의에 답변할 수 없습니다. 현재까지 수집된 findings를 참고하세요.]`);
+        return;
+      }
+
       const id = ++this._seq;
       const timer = setTimeout(() => {
         if (this._pending.has(id)) {
@@ -537,8 +545,11 @@ class AgentBus {
     if (p) { p.resolve(answer); this._pending.delete(id); }
   }
 
-  // [fix] 에이전트 종료 시 inbox 잔여 질의를 일괄 자동 답변 (데드락 방지)
+  // 에이전트 종료 시:
+  //   1. _closed에 등록 → 이후 도착하는 질의는 ask()에서 즉시 응답
+  //   2. 종료 시점에 이미 inbox에 있던 질의는 drain 후 일괄 자동 답변
   closeAgent(name, label) {
+    this._closed.set(name, label);
     for (const q of this.drain(name)) {
       agentMsg(name, label, "progress", `↩ [종료] 질의 ${q.id} 자동 답변`);
       this.reply(q.id, `[${label} 분석이 완료되어 질의에 답변할 수 없습니다. 현재까지 수집된 findings를 참고하세요.]`);
