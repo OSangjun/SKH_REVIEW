@@ -1344,12 +1344,13 @@ body.log-collapsed #log-body { display: none; }
 /* ── 말풍선 ────────────────────────────────────────────────────────────── */
 .ov-agent-bubble {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: calc(100% + 10px);
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 220px;
   background: rgba(28,32,44,.97);
-  border: 1px solid rgba(255,255,255,.13);
-  border-radius: 8px 8px 8px 3px;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 3px 8px 8px 8px;
   padding: 7px 10px;
   font-size: 9.5px;
   line-height: 1.55;
@@ -1358,21 +1359,22 @@ body.log-collapsed #log-body { display: none; }
   word-break: break-word;
   pointer-events: none;
   z-index: 200;
-  box-shadow: 0 6px 18px rgba(0,0,0,.55);
+  box-shadow: 0 4px 16px rgba(0,0,0,.6);
   opacity: 1;
   transition: opacity .4s ease;
 }
 .ov-agent-bubble.hidden { display: none; }
 .ov-agent-bubble.fading { opacity: 0; }
-/* 말풍선 꼬리 - 아래를 향해 아바타 위를 가리킴 */
+/* 말풍선 꼬리 - 좌측을 향해 아바타를 가리킴 */
 .ov-agent-bubble::after {
   content: "";
   position: absolute;
-  bottom: -6px;
-  left: 16px;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 6px solid rgba(28,32,44,.97);
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-right: 6px solid rgba(28,32,44,.97);
 }
 
 /* 분석 모드에서 strip 색상 변경 */
