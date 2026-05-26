@@ -1239,56 +1239,142 @@ body.log-collapsed #log-body { display: none; }
   color: var(--rec-color);
 }
 
-/* ── 분석 에이전트 상태 패널 ─────────────────────────────────────────────── */
-#ov-agents {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  background: rgba(10,12,16,.88);
-  border-bottom: 1px solid var(--border);
+/* ── 에이전트 사이드바 레이아웃 ──────────────────────────────────────────── */
+.ov-main-row {
+  flex: 1;
+  display: flex;
+  min-height: 0;
   pointer-events: none;
+}
+
+#ov-agents {
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(10,12,16,.92);
+  border-right: 1px solid rgba(255,255,255,.08);
+  overflow: visible;
+  pointer-events: all;
   flex-shrink: 0;
 }
 #ov-agents.hidden { display: none; }
 
+.ov-agents-header {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 8px 12px 4px;
+  opacity: .5;
+}
+
+/* ── 에이전트 카드 (메신저 스타일) ─────────────────────────────────────── */
 .ov-agent-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 10px;
-  border-right: 1px solid rgba(255,255,255,.05);
+  gap: 9px;
+  padding: 8px 10px;
   border-bottom: 1px solid rgba(255,255,255,.04);
+  position: relative;
+}
+.ov-agent-row.running { background: rgba(79,142,255,.06); }
+
+/* 아바타 원형 */
+.ov-agent-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: -.3px;
+  flex-shrink: 0;
+  position: relative;
+}
+.ov-agent-avatar[data-agent="ui"]        { background: #162a4a; color: #4f8eff; border: 1px solid #1e3d70; }
+.ov-agent-avatar[data-agent="ui-source"] { background: #231547; color: #a78bfa; border: 1px solid #341f6e; }
+.ov-agent-avatar[data-agent="frontend"]  { background: #0b2e1e; color: #22c55e; border: 1px solid #145c3b; }
+.ov-agent-avatar[data-agent="backend"]   { background: #2e1a00; color: #f59e0b; border: 1px solid #5c3600; }
+.ov-agent-avatar[data-agent="db"]        { background: #2e0b0b; color: #ef4444; border: 1px solid #5c1616; }
+.ov-agent-avatar[data-agent="lead"]      { background: #2e2500; color: #fbbf24; border: 1px solid #5c4a00; }
+.ov-agent-avatar[data-agent="recording"] { background: #062828; color: #06b6d4; border: 1px solid #0d4e50; }
+
+/* 에이전트 정보 (이름 + 상태 메시지) */
+.ov-agent-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
   overflow: hidden;
 }
-.ov-agent-icon {
-  font-size: 12px;
-  width: 14px;
-  text-align: center;
-  flex-shrink: 0;
-  line-height: 1;
-}
-.ov-agent-icon.pending  { color: var(--text-dim); }
-.ov-agent-icon.running  { color: var(--accent); display: inline-block; animation: ov-spin .9s linear infinite; }
-.ov-agent-icon.done     { color: #22c55e; }
-.ov-agent-icon.error    { color: var(--rec-color); }
-@keyframes ov-spin { to { transform: rotate(360deg); } }
-
 .ov-agent-name {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
-  color: var(--text-mid);
+  color: #c8cdd6;
   white-space: nowrap;
-  flex-shrink: 0;
-  min-width: 68px;
-  letter-spacing: -.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ov-agent-msg {
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
 }
+
+/* 우측 상태 아이콘 */
+.ov-agent-icon {
+  font-size: 13px;
+  width: 16px;
+  text-align: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.ov-agent-icon.pending { color: rgba(255,255,255,.2); }
+.ov-agent-icon.running { color: var(--accent); display: inline-block; animation: ov-spin .9s linear infinite; }
+.ov-agent-icon.done    { color: #22c55e; }
+.ov-agent-icon.error   { color: var(--rec-color); }
+@keyframes ov-spin { to { transform: rotate(360deg); } }
+
+/* ── 말풍선 ────────────────────────────────────────────────────────────── */
+.ov-agent-bubble {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 10px);
+  background: rgba(28,32,44,.97);
+  border: 1px solid rgba(255,255,255,.13);
+  border-radius: 8px 8px 8px 3px;
+  padding: 7px 10px;
+  font-size: 9.5px;
+  line-height: 1.55;
+  color: #c8cdd6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  pointer-events: none;
+  z-index: 200;
+  box-shadow: 0 6px 18px rgba(0,0,0,.55);
+  opacity: 1;
+  transition: opacity .4s ease;
+}
+.ov-agent-bubble.hidden { display: none; }
+.ov-agent-bubble.fading { opacity: 0; }
+/* 말풍선 꼬리 - 아래를 향해 아바타 위를 가리킴 */
+.ov-agent-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -6px;
+  left: 16px;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid rgba(28,32,44,.97);
+}
+
 /* 분석 모드에서 strip 색상 변경 */
 #replay-overlay.analyzing .ov-strip-label { color: #a78bfa; }
 #replay-overlay.analyzing .ov-bar-fill {

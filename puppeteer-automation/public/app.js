@@ -783,14 +783,49 @@
 
   // ── Agent panel helpers ───────────────────────────────────────────────────────
   const AGENT_ICONS = { pending: '○', running: '↻', done: '✓', error: '✗', start: '↻', progress: '↻' };
+  const _bubbleTimers = {};
 
   function resetAgentPanel() {
     ovAgents.querySelectorAll('.ov-agent-row').forEach((row) => {
-      const icon = row.querySelector('.ov-agent-icon');
-      const msg  = row.querySelector('.ov-agent-msg');
-      if (icon) { icon.className = 'ov-agent-icon pending'; icon.textContent = '○'; }
-      if (msg)  msg.textContent = '대기 중';
+      const icon   = row.querySelector('.ov-agent-icon');
+      const msg    = row.querySelector('.ov-agent-msg');
+      const bubble = row.querySelector('.ov-agent-bubble');
+      if (icon)   { icon.className = 'ov-agent-icon pending'; icon.textContent = '○'; }
+      if (msg)    msg.textContent = '대기 중';
+      if (bubble) { bubble.textContent = ''; bubble.className = 'ov-agent-bubble hidden'; }
+      row.classList.remove('running');
     });
+    Object.keys(_bubbleTimers).forEach(k => {
+      clearTimeout(_bubbleTimers[k].show);
+      clearTimeout(_bubbleTimers[k].fade);
+      delete _bubbleTimers[k];
+    });
+  }
+
+  function showBubble(row, text) {
+    const bubble = row.querySelector('.ov-agent-bubble');
+    if (!bubble) return;
+    const agent = row.dataset.agent;
+
+    // 기존 타이머 제거
+    if (_bubbleTimers[agent]) {
+      clearTimeout(_bubbleTimers[agent].fade);
+      clearTimeout(_bubbleTimers[agent].show);
+    }
+
+    bubble.textContent = text.length > 120 ? text.slice(0, 117) + '…' : text;
+    bubble.className = 'ov-agent-bubble';
+
+    // 10초 후 페이드아웃 → 숨김
+    const fadeTimer = setTimeout(() => {
+      bubble.classList.add('fading');
+      const hideTimer = setTimeout(() => {
+        bubble.className = 'ov-agent-bubble hidden';
+        bubble.textContent = '';
+      }, 400);
+      _bubbleTimers[agent] = { fade: null, show: hideTimer };
+    }, 10000);
+    _bubbleTimers[agent] = { fade: fadeTimer, show: null };
   }
 
   function updateAgentRow(agent, status, message) {
@@ -799,11 +834,18 @@
     const icon = row.querySelector('.ov-agent-icon');
     const msg  = row.querySelector('.ov-agent-msg');
     const cls  = (status === 'start' || status === 'progress') ? 'running' : status;
+
     if (icon) {
       icon.className   = `ov-agent-icon ${cls}`;
       icon.textContent = AGENT_ICONS[status] || '○';
     }
-    if (msg) msg.textContent = message.slice(0, 60);
+    if (msg) msg.textContent = message.slice(0, 50);
+
+    // running 행 하이라이트
+    row.classList.toggle('running', cls === 'running');
+
+    // 말풍선: progress/start/done/error 메시지 표시
+    if (message && status !== 'pending') showBubble(row, message);
   }
 
   // ── Analyze ────────────────────────────────────────────────────────────────────
