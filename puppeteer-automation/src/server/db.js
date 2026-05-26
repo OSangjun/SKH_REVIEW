@@ -31,6 +31,8 @@ const stmts = {
   getCookies: db.prepare(`SELECT cookies   FROM recordings WHERE id = ?`),
   getToasts: db.prepare(`SELECT toasts       FROM recordings WHERE id = ?`),
   getDomSnapshot: db.prepare(`SELECT dom_snapshot FROM recordings WHERE id = ?`),
+  getDomExclude:  db.prepare(`SELECT dom_exclude  FROM recordings WHERE id = ?`),
+  updateDomExclude: db.prepare(`UPDATE recordings SET dom_exclude = ? WHERE id = ?`),
   deleteRecording: db.prepare(`DELETE FROM recordings WHERE id = ?`),
   insertHistory: db.prepare(
     `INSERT INTO run_history (recording_id, run_at, passed, failed, total, results, duration_ms)
@@ -116,6 +118,13 @@ function dbLoadDomSnapshot(id) {
   const row = stmts.getDomSnapshot.get(id);
   return row ? tryJson(row.dom_snapshot, []) : [];
 }
+function dbLoadDomExclude(id) {
+  const row = stmts.getDomExclude.get(id);
+  return row ? tryJson(row.dom_exclude, []) : [];
+}
+function dbUpdateDomExclude(id, paths) {
+  stmts.updateDomExclude.run(JSON.stringify(paths ?? []), id);
+}
 function dbSaveRecording(name, url, eventCount, createdAt, events, responses, cookies, toasts, domSnapshot) {
   const info = stmts.insertRecording.run({
     name, url,
@@ -165,6 +174,7 @@ module.exports = {
   tryJson,
   dbAllMeta, dbGetMeta,
   dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts, dbLoadDomSnapshot,
+  dbLoadDomExclude, dbUpdateDomExclude,
   dbSaveRecording, dbUpdateMeta, dbUpdateName, dbUpdateResponses, dbDeleteRecording,
   dbDeleteHistoryByRecording,
   dbGetHistory, dbAllHistory, dbSaveHistory,

@@ -1039,6 +1039,7 @@
   </div>
   <div class="rec-export">
     <button class="btn-rec-http"   data-id="${rec.id}" title="HTTP 응답 열람/편집">${ICON('server')} HTTP</button>
+    <button class="btn-rec-dom"    data-id="${rec.id}" title="DOM 비교 제외 설정">${ICON('layers')} DOM</button>
     <button class="btn-rec-json"   data-id="${rec.id}" title="JSON으로 내보내기">${ICON('braces')} JSON</button>
     <button class="btn-rec-script" data-id="${rec.id}" title="Puppeteer 스크립트로 내보내기">${ICON('code')} Script</button>
   </div>
@@ -1101,6 +1102,7 @@
     const tagRm   = e.target.closest('.tag-rm');
     const rep     = e.target.closest('.btn-rec-replay');
     const xhttp   = e.target.closest('.btn-rec-http');
+    const xdom    = e.target.closest('.btn-rec-dom');
     const xjson   = e.target.closest('.btn-rec-json');
     const xscript = e.target.closest('.btn-rec-script');
     const item    = e.target.closest('.rec-item');
@@ -1120,6 +1122,7 @@
     if (tagRm)   { e.stopPropagation(); tagRm.closest('.tag-chip').remove(); return; }
     if (rep)     { e.stopPropagation(); replayRecording(+rep.dataset.id);   return; }
     if (xhttp)   { e.stopPropagation(); openRespModal(+xhttp.dataset.id);   return; }
+    if (xdom)    { e.stopPropagation(); openDomModal(+xdom.dataset.id);     return; }
     if (xjson)   { e.stopPropagation(); exportJson(+xjson.dataset.id);      return; }
     if (xscript) { e.stopPropagation(); exportScript(+xscript.dataset.id);  return; }
     if (item && !e.target.closest('.rec-edit-form')) {
@@ -1532,6 +1535,112 @@
   });
   respModal.addEventListener('click', e => {
     if (e.target === respModal) respModal.classList.add('hidden');
+  });
+
+  // ── DOM 비교 제외 모달 ────────────────────────────────────────────────────────
+  const domModal      = document.getElementById('dom-modal');
+  const domListWrap   = document.getElementById('dom-list-wrap');
+  const domEmptyMsg   = document.getElementById('dom-empty-msg');
+  const domCountLabel = document.getElementById('dom-count-label');
+  const domSearch     = document.getElementById('dom-search');
+  let domModalId      = null;
+  let domAllPaths     = [];   // { path, texts: string[] } unique paths from snapshot
+  let domExcluded     = new Set();
+
+  async function openDomModal(id) {
+    domModalId = id;
+    domListWrap.innerHTML = '';
+    domCountLabel.textContent = '';
+    domSearch.value = '';
+    domEmptyMsg.style.display = 'block';
+    domModal.classList.remove('hidden');
+
+    let snapshot = [], exclude = [];
+    try {
+      const res = await fetch(`/api/recordings/${id}/dom-snapshot`);
+      if (res.ok) { const d = await res.json(); snapshot = d.snapshot || []; exclude = d.exclude || []; }
+    } catch {}
+
+    domExcluded = new Set(exclude);
+
+    // Collect unique paths with their associated text samples
+    const pathMap = new Map();
+    for (const e of snapshot) {
+      if (!pathMap.has(e.path)) pathMap.set(e.path, []);
+      if (pathMap.get(e.path).length < 3) pathMap.get(e.path).push(e.text);
+    }
+    domAllPaths = [...pathMap.entries()].map(([path, texts]) => ({ path, texts }));
+
+    renderDomList('');
+  }
+
+  function renderDomList(filter) {
+    const q = filter.toLowerCase();
+    const visible = domAllPaths.filter(p => !q || p.path.toLowerCase().includes(q) || p.texts.some(t => t.toLowerCase().includes(q)));
+
+    if (visible.length === 0) {
+      domListWrap.innerHTML = '';
+      domEmptyMsg.style.display = 'block';
+      domCountLabel.textContent = '';
+      return;
+    }
+    domEmptyMsg.style.display = 'none';
+
+    const excluded = visible.filter(p => domExcluded.has(p.path)).length;
+    domCountLabel.textContent = `${visible.length}개 경로 / ${excluded}개 제외`;
+
+    domListWrap.innerHTML = visible.map(({ path, texts }) => {
+      const checked = !domExcluded.has(path);
+      const preview = texts.map(t => esc(t.length > 50 ? t.slice(0, 47) + '…' : t)).join(' / ');
+      return `<label class="dom-path-row${checked ? '' : ' excluded'}" data-path="${esc(path)}">
+  <input type="checkbox" class="dom-path-chk" data-path="${esc(path)}" ${checked ? 'checked' : ''} />
+  <span class="dom-path-str" title="${esc(path)}">${esc(path)}</span>
+  <span class="dom-path-preview">${preview}</span>
+</label>`;
+    }).join('');
+  }
+
+  domSearch.addEventListener('input', () => renderDomList(domSearch.value));
+
+  domListWrap.addEventListener('change', e => {
+    const chk = e.target.closest('.dom-path-chk');
+    if (!chk) return;
+    const path = chk.dataset.path;
+    if (chk.checked) domExcluded.delete(path);
+    else domExcluded.add(path);
+    const row = chk.closest('.dom-path-row');
+    if (row) row.classList.toggle('excluded', !chk.checked);
+    const visible = domListWrap.querySelectorAll('.dom-path-row').length;
+    const excl = domListWrap.querySelectorAll('.dom-path-row.excluded').length;
+    domCountLabel.textContent = `${visible}개 경로 / ${excl}개 제외`;
+  });
+
+  document.getElementById('dom-check-all').addEventListener('click', () => {
+    domAllPaths.forEach(p => domExcluded.delete(p.path));
+    renderDomList(domSearch.value);
+  });
+  document.getElementById('dom-uncheck-all').addEventListener('click', () => {
+    domAllPaths.forEach(p => domExcluded.add(p.path));
+    renderDomList(domSearch.value);
+  });
+
+  document.getElementById('dom-save-btn').addEventListener('click', async () => {
+    if (domModalId === null) return;
+    try {
+      await fetch(`/api/recordings/${domModalId}/dom-exclude`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([...domExcluded]),
+      });
+    } catch {}
+    domModal.classList.add('hidden');
+  });
+
+  document.getElementById('dom-modal-close').addEventListener('click', () => {
+    domModal.classList.add('hidden');
+  });
+  domModal.addEventListener('click', e => {
+    if (e.target === domModal) domModal.classList.add('hidden');
   });
 
   // ── Boot ──────────────────────────────────────────────────────────────────────

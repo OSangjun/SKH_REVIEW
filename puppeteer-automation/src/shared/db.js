@@ -41,6 +41,7 @@ function openDb() {
     `ALTER TABLE recordings ADD COLUMN cookies      TEXT NOT NULL DEFAULT '[]'`,
     `ALTER TABLE recordings ADD COLUMN toasts       TEXT NOT NULL DEFAULT '[]'`,
     `ALTER TABLE recordings ADD COLUMN dom_snapshot TEXT NOT NULL DEFAULT '[]'`,
+    `ALTER TABLE recordings ADD COLUMN dom_exclude  TEXT NOT NULL DEFAULT '[]'`,
   ]) {
     try { db.exec(col); } catch {}
   }

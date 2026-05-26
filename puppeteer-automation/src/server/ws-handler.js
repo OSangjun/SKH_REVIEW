@@ -3,6 +3,7 @@
 const {
   dbGetMeta, dbAllMeta,
   dbLoadEvents, dbLoadResponses, dbLoadCookies, dbLoadToasts, dbLoadDomSnapshot,
+  dbLoadDomExclude,
   dbSaveRecording, dbUpdateMeta, dbUpdateName,
   dbDeleteRecording, dbDeleteHistoryByRecording,
   dbFindInitByUrl,
@@ -242,6 +243,7 @@ async function handleClientMessage(msg) {
       const cookies = dbLoadCookies(msg.id);
       const toasts = dbLoadToasts(msg.id);
       const domSnapshot = dbLoadDomSnapshot(msg.id);
+      const domExclude  = dbLoadDomExclude(msg.id);
       await runReplay(
         msg.id,
         events,
@@ -253,6 +255,7 @@ async function handleClientMessage(msg) {
         msg.compareHttp !== false,
         !!msg.mockReplay,
         domSnapshot,
+        domExclude,
       );
       break;
     }
@@ -284,6 +287,7 @@ async function handleClientMessage(msg) {
         const cookies = dbLoadCookies(id);
         const toasts = dbLoadToasts(id);
         const domSnapshot = dbLoadDomSnapshot(id);
+        const domExclude  = dbLoadDomExclude(id);
 
         send({ type: "suite-item-started", index: i, total: ids.length, name: meta.name });
         log("info", `━━ [${i + 1}/${ids.length}] ${meta.name} ━━`);
@@ -299,6 +303,7 @@ async function handleClientMessage(msg) {
           msg.compareHttp !== false,
           !!msg.mockReplay,
           domSnapshot,
+          domExclude,
         );
 
         if (result.failed === 0) suitePass++;

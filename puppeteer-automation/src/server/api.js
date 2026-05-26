@@ -3,6 +3,7 @@
 const {
   dbAllMeta, dbGetMeta,
   dbLoadEvents, dbLoadResponses,
+  dbLoadDomSnapshot, dbLoadDomExclude, dbUpdateDomExclude,
   dbDeleteRecording, dbUpdateResponses,
 } = require("./db");
 const { generateScript } = require("./export");
@@ -43,6 +44,26 @@ function mountRoutes(app) {
     if (!Array.isArray(responses))
       return res.status(400).json({ error: "Expected array" });
     dbUpdateResponses(meta.id, JSON.stringify(responses));
+    res.json({ ok: true });
+  });
+
+  // ── DOM snapshot + exclude ────────────────────────────────────────────────
+  app.get("/api/recordings/:id/dom-snapshot", (req, res) => {
+    const meta = dbGetMeta(+req.params.id);
+    if (!meta) return res.status(404).json({ error: "Not found" });
+    res.json({
+      snapshot: dbLoadDomSnapshot(meta.id),
+      exclude:  dbLoadDomExclude(meta.id),
+    });
+  });
+
+  app.put("/api/recordings/:id/dom-exclude", (req, res) => {
+    const meta = dbGetMeta(+req.params.id);
+    if (!meta) return res.status(404).json({ error: "Not found" });
+    const paths = req.body;
+    if (!Array.isArray(paths))
+      return res.status(400).json({ error: "Expected array of path strings" });
+    dbUpdateDomExclude(meta.id, paths);
     res.json({ ok: true });
   });
 

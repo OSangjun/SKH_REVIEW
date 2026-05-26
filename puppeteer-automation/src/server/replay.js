@@ -420,6 +420,7 @@ async function runReplay(
   compareHttp = true,
   mockReplay = false,
   recordingDomSnapshot = [],
+  domExclude = [],
 ) {
   const startMs = Date.now();
   if (!isSuite) send({ type: "replay-started" });
@@ -659,7 +660,7 @@ async function runReplay(
 
   const toastResults = compareToasts(recordingToasts, state.replayToasts);
   const triggerResults = compareTriggerMappings(events, replayTriggerMap);
-  const domResults = compareDomSnapshots(recordingDomSnapshot, replayDomSnapshot);
+  const domResults = compareDomSnapshots(recordingDomSnapshot, replayDomSnapshot, domExclude);
   const passed = results.filter((r) => r.pass).length;
   const httpFailed = results.filter((r) => !r.pass).length;
   const toastFailed = toastResults.filter((r) => !r.pass).length;

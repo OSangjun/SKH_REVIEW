@@ -220,14 +220,16 @@ function compareTriggerMappings(events, replayTriggerMap) {
 //   1. Same path, same text → pass
 //   2. Same path, different text → fail (reason: 'text-mismatch', actualTexts: [...])
 //   3. Path not found in replay → fail (reason: 'path-missing')
-function compareDomSnapshots(recorded, replayed) {
+// excludePaths: array of path strings to skip entirely.
+function compareDomSnapshots(recorded, replayed, excludePaths = []) {
   if (!recorded || recorded.length === 0) return [];
+  const excluded = new Set(excludePaths || []);
   const byPath = new Map();
   for (const r of (replayed || [])) {
     if (!byPath.has(r.path)) byPath.set(r.path, []);
     byPath.get(r.path).push(r);
   }
-  return recorded.map((r) => {
+  return recorded.filter((r) => !excluded.has(r.path)).map((r) => {
     const atPath = byPath.get(r.path) ?? [];
     if (atPath.length === 0) {
       return { path: r.path, text: r.text, pass: false, reason: 'path-missing', rect: null, recRect: r.rect ?? null };
