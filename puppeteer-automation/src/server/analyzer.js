@@ -957,15 +957,32 @@ URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
   return runAgent({
     name: "backend", label: "Backend 분석",
     bus,
-    tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    tools: [...GITLAB_TOOLS, ...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 백엔드 소스 분석 에이전트입니다.
 프론트엔드 에이전트가 발견한 API 엔드포인트를 바탕으로 백엔드 컨트롤러/서비스를 분석합니다.
 
+## 프로젝트 탐색 전략 (404 대응)
+
+백엔드 소스는 기본 GitLab 프로젝트(GITLAB_PROJECT 환경변수)와 다른 프로젝트에 있을 수 있습니다.
+아래 순서로 탐색하세요:
+
+[1단계] 기본 프로젝트에서 먼저 검색:
+  gitlab_search_code 또는 gitlab_list_files 사용
+
+[2단계] 404 에러 또는 결과 없음이면 → 동적 프로젝트 탐색으로 전환:
+  a. derive_project_from_url("엔드포인트 경로") 로 프로젝트명 도출
+     예: "/order/api/list" → project="order"
+  b. get_branch_for_project("order") 로 대상 브랜치 확인
+  c. gitlab_search_code_in(project, "검색어") 로 재검색
+  d. gitlab_get_file_in(project, "파일경로", ref) 로 파일 읽기
+
+[3단계] 컨트롤러 → 서비스 → 리포지터리/매퍼 순서로 추적:
+  각 파일에서 import/의존성을 따라가며 계속 탐색
+
 분석 순서:
-1. 각 API 경로로 gitlab_search_code 검색
-   - Spring: "@GetMapping", "@PostMapping" 등
-   - Express/Koa: "router.get(", "router.post(" 등
-2. 컨트롤러 파일 읽기
+1. 각 API 경로로 gitlab_search_code 검색 (Spring: "@GetMapping/@PostMapping", Node: "router.get/router.post")
+   - 404 에러 → 즉시 2단계(derive_project_from_url)로 전환, 포기하지 마세요
+2. 컨트롤러 파일 읽기 (gitlab_get_file 또는 gitlab_get_file_in)
 3. 서비스/레포지터리/매퍼 파일 읽기
 4. DB 쿼리, 테이블명, 비즈니스 조건 파악
 
