@@ -2,17 +2,25 @@
 
 // GitLab REST API client.
 // Reads GITLAB_URL, GITLAB_TOKEN, GITLAB_PROJECT from env.
-// GITLAB_PROJECT is a project path like "group/repo"; the client URL-encodes it.
+// GITLAB_PROJECT: 쉼표로 구분된 GitLab 프로젝트 ID(숫자) 목록.
+//   예: GITLAB_PROJECT=123,456,789
+// 단일 ID도 허용. 기존 단일 프로젝트 함수는 첫 번째 ID를 사용.
 
 const https = require("https");
 const http  = require("http");
 
-const BASE    = (process.env.GITLAB_URL || "").replace(/\/$/, "");
-const TOKEN   = process.env.GITLAB_TOKEN || "";
-const PROJECT = process.env.GITLAB_PROJECT || "";
+const BASE     = (process.env.GITLAB_URL || "").replace(/\/$/, "");
+const TOKEN    = process.env.GITLAB_TOKEN || "";
+const PROJECTS = (process.env.GITLAB_PROJECT || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+const PROJECT  = PROJECTS[0] || "";
 
 function projectId() {
   return encodeURIComponent(PROJECT);
+}
+
+function getProjectIds() {
+  return PROJECTS;
 }
 
 function request(urlPath) {
@@ -37,7 +45,7 @@ function request(urlPath) {
 }
 
 function isConfigured() {
-  return !!(BASE && TOKEN && PROJECT);
+  return !!(BASE && TOKEN && PROJECTS.length);
 }
 
 // List files/directories under `path` in the repository.
@@ -111,6 +119,6 @@ async function searchCodeIn(project, query) {
 }
 
 module.exports = {
-  isConfigured, listFiles, getFile, searchCode,
+  isConfigured, getProjectIds, listFiles, getFile, searchCode,
   isReady, listFilesIn, getFileIn, searchCodeIn,
 };

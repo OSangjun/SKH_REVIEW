@@ -885,24 +885,35 @@ async function runFrontendAgent(url, bus) {
     agentMsg("frontend", "Frontend 분석", "done", "GitLab 미설정 — 스킵");
     return { skipped: true, apiEndpoints: [], validationRules: [] };
   }
-  const urlPath = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+  const urlPath    = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+  const projectIds = gitlab.getProjectIds();
 
   return runAgent({
     name: "frontend", label: "Frontend 분석",
     bus,
-    tools: [...GITLAB_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    tools: [...GITLAB_TOOLS, ...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 Vue.js 프론트엔드 소스 분석 에이전트입니다.
 현재 URL 경로에 해당하는 Vue 컴포넌트를 추적하여 UI→API까지 분석합니다.
 
+## 프로젝트 탐색 전략
+
+설정된 GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
+이 목록의 모든 프로젝트를 순서대로 검색하여 프론트엔드 소스를 찾으세요.
+
+탐색 방법:
+- gitlab_search_code_in(projectId, "검색어") 로 각 프로젝트 검색
+- gitlab_list_files_in(projectId, "") 로 루트 구조 확인
+- gitlab_get_file_in(projectId, "파일경로") 로 파일 읽기
+- 첫 번째 프로젝트에서 결과가 없으면 다음 프로젝트로 전환
+
 분석 순서:
-1. gitlab_list_files("") → 프로젝트 루트 구조 파악
-2. gitlab_search_code로 Vue Router에서 현재 경로("${urlPath}") 검색
-3. 매핑된 Vue 컴포넌트 파일 읽기 (gitlab_get_file)
-4. 컴포넌트의 import 문 추적:
+1. 각 프로젝트에서 gitlab_search_code_in 으로 Vue Router에서 현재 경로("${urlPath}") 검색
+2. 매핑된 Vue 컴포넌트 파일 읽기 (gitlab_get_file_in)
+3. 컴포넌트의 import 문 추적:
    - 하위 컴포넌트 (src/components/ 등)
    - Composables / hooks (src/composables/)
    - API 클라이언트 파일 (src/api/, src/services/)
-5. API 클라이언트에서 엔드포인트 경로 추출
+4. API 클라이언트에서 엔드포인트 경로 추출
 
 비즈니스 로직 발견 시 즉시 send_finding 호출:
 - API 엔드포인트 발견 → findingType: "api_endpoint"
@@ -919,8 +930,9 @@ report_findings 포함:
 - formFields: [{name, type, required, validations}]
 - businessLogic: 발견된 비즈니스 로직 설명 목록`,
     userMessage: `현재 페이지 URL: ${url} (경로: ${urlPath})
+탐색할 프로젝트 IDs: [${projectIds.join(", ")}]
 
-Vue Router에서 이 경로의 컴포넌트를 찾아 UI→API까지 추적하고,
+각 프로젝트에서 Vue Router → 컴포넌트 → API 클라이언트 순으로 추적하고,
 발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`,
     execTool: execGitlab,
   });
@@ -932,7 +944,8 @@ async function runBackendAgent(frontendFindings, bus, url) {
     agentMsg("backend", "Backend 분석", "done", "GitLab 미설정 — 스킵");
     return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
   }
-  const endpoints = frontendFindings.apiEndpoints || [];
+  const endpoints  = frontendFindings.apiEndpoints || [];
+  const projectIds = gitlab.getProjectIds();
   // 팀 모드(bus 있음): 엔드포인트 없어도 URL로 시작, 질의 응답 대기
   // 단독 모드(bus 없음): 엔드포인트 없으면 스킵
   if (!bus && !endpoints.length) {
@@ -940,15 +953,22 @@ async function runBackendAgent(frontendFindings, bus, url) {
     return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
   }
 
+  const projectsNote = `탐색할 프로젝트 IDs: [${projectIds.join(", ")}]
+각 프로젝트를 순서대로 검색하여 관련 소스를 찾으세요. 한 프로젝트에서 결과가 없으면 다음 프로젝트로 전환하세요.`;
+
   const userMessage = endpoints.length
     ? `Frontend 분석 결과 (API 엔드포인트):
 \`\`\`json
 ${JSON.stringify({ apiEndpoints: endpoints, validationRules: frontendFindings.validationRules || [] }, null, 2).slice(0, 4000)}
 \`\`\`
 
+${projectsNote}
+
 각 엔드포인트의 백엔드 컨트롤러/서비스를 찾아 분석하고,
 발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`
     : `분석 대상 URL: ${url || "알 수 없음"}
+
+${projectsNote}
 
 Frontend 에이전트가 아직 엔드포인트를 제공하지 않았습니다.
 URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
@@ -957,33 +977,26 @@ URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
   return runAgent({
     name: "backend", label: "Backend 분석",
     bus,
-    tools: [...GITLAB_TOOLS, ...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
+    tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 백엔드 소스 분석 에이전트입니다.
 프론트엔드 에이전트가 발견한 API 엔드포인트를 바탕으로 백엔드 컨트롤러/서비스를 분석합니다.
 
-## 프로젝트 탐색 전략 (404 대응)
+## 프로젝트 탐색 전략
 
-백엔드 소스는 기본 GitLab 프로젝트(GITLAB_PROJECT 환경변수)와 다른 프로젝트에 있을 수 있습니다.
-아래 순서로 탐색하세요:
+설정된 GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
+이 목록의 모든 프로젝트를 순서대로 검색하여 백엔드 소스를 찾으세요.
 
-[1단계] 기본 프로젝트에서 먼저 검색:
-  gitlab_search_code 또는 gitlab_list_files 사용
+탐색 방법 (gitlab_*_in 도구 사용):
+- gitlab_search_code_in(projectId, "검색어") — 각 프로젝트에서 코드 검색
+- gitlab_list_files_in(projectId, "") — 루트 구조 확인
+- gitlab_get_file_in(projectId, "파일경로") — 파일 읽기
 
-[2단계] 404 에러 또는 결과 없음이면 → 동적 프로젝트 탐색으로 전환:
-  a. derive_project_from_url("엔드포인트 경로") 로 프로젝트명 도출
-     예: "/order/api/list" → project="order"
-  b. get_branch_for_project("order") 로 대상 브랜치 확인
-  c. gitlab_search_code_in(project, "검색어") 로 재검색
-  d. gitlab_get_file_in(project, "파일경로", ref) 로 파일 읽기
-
-[3단계] 컨트롤러 → 서비스 → 리포지터리/매퍼 순서로 추적:
-  각 파일에서 import/의존성을 따라가며 계속 탐색
-
-분석 순서:
-1. 각 API 경로로 gitlab_search_code 검색 (Spring: "@GetMapping/@PostMapping", Node: "router.get/router.post")
-   - 404 에러 → 즉시 2단계(derive_project_from_url)로 전환, 포기하지 마세요
-2. 컨트롤러 파일 읽기 (gitlab_get_file 또는 gitlab_get_file_in)
-3. 서비스/레포지터리/매퍼 파일 읽기
+탐색 순서:
+1. 각 API 엔드포인트 경로로 모든 프로젝트에서 순서대로 검색
+   (Spring: "@GetMapping/@PostMapping", Node: "router.get/router.post")
+   - 결과 없으면 다음 프로젝트 ID로 전환, 포기하지 마세요
+2. 소스 발견 시: 컨트롤러 → 서비스 → 리포지터리/매퍼 순서로 추적
+3. 각 파일의 import/의존성을 따라가며 계속 탐색
 4. DB 쿼리, 테이블명, 비즈니스 조건 파악
 
 발견 시 즉시 send_finding 호출:
