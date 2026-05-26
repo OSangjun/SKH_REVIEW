@@ -302,13 +302,42 @@ const BROWSER_TOOLS = [
 
 function buildDbTools(configuredDbs) {
   if (!configuredDbs.length) return [];
+
+  // DB별 엔진 정보를 도구 설명에 포함
+  const dbDesc = configuredDbs.map((n) => {
+    const eng = db.engineFor(n);
+    const syntax = eng === "tibero"
+      ? "Tibero — 행 제한: FETCH FIRST N ROWS ONLY 또는 ROWNUM <= N"
+      : eng === "mariadb"
+      ? "MariaDB — 행 제한: LIMIT N"
+      : eng === "pg"
+      ? "PostgreSQL — 행 제한: LIMIT N"
+      : n;
+    return `- ${n}: ${syntax}`;
+  }).join("\n");
+
   return [{
     name: "db_query",
-    description: `DB에 SELECT 쿼리를 실행합니다. db 파라미터로 접속할 DB를 지정하세요.\n- local: 업무/도메인 데이터 (사용자, 거래, 계정 등)\n- center: 공통/마스터 데이터 (공통코드, 권한, 기준 데이터 등)`,
+    description: [
+      "DB에 SELECT 쿼리를 실행합니다. db 파라미터로 접속할 DB를 지정하세요.",
+      "⚠️ 모든 SELECT는 시스템이 자동으로 최대 100건으로 제한합니다.",
+      "",
+      "DB 종류 및 엔진별 문법:",
+      "- local: 업무/도메인 데이터 (사용자, 거래, 계정 등)",
+      "- center: 공통/마스터 데이터 (공통코드, 권한, 기준 데이터 등)",
+      "",
+      "설정된 DB 및 엔진:",
+      dbDesc,
+      "",
+      "Tibero 쿼리 예시 (FETCH FIRST 사용 권장):",
+      "  SELECT col1, col2 FROM table_name WHERE cond = :1 FETCH FIRST 10 ROWS ONLY",
+      "MariaDB 쿼리 예시:",
+      "  SELECT col1, col2 FROM table_name WHERE cond = ? LIMIT 10",
+    ].join("\n"),
     input_schema: {
       type: "object",
       properties: {
-        sql:    { type: "string", description: "실행할 SELECT SQL" },
+        sql:    { type: "string", description: "실행할 SELECT SQL (엔진에 맞는 문법 사용)" },
         params: { type: "array",  items: { type: "string" }, description: "바인딩 파라미터" },
         db:     { type: "string", enum: configuredDbs, description: `접속할 DB (${configuredDbs.join(" | ")})` },
       },
@@ -356,27 +385,44 @@ async function execGitlab(name, input) {
   }
 }
 
-// SELECT 쿼리에 LIMIT 100 을 강제 적용한다.
-// - LIMIT 없음 → " LIMIT 100" 추가
-// - LIMIT N (N>100) → LIMIT 100 으로 대체
-// - LIMIT offset, count (MySQL) → count 부분을 100 이하로 제한
-function enforceSqlLimit(sql, maxRows = 100) {
+// SELECT 쿼리에 LIMIT 100 을 강제 적용한다 (엔진별 문법 분기).
+// db-client.js 의 enforceSqlLimitForEngine 와 동일 로직 — analyzer 1차 방어선.
+//   mariadb : LIMIT N
+//   tibero  : FETCH FIRST N ROWS ONLY  /  ROWNUM <= N
+function enforceSqlLimit(sql, dbName, maxRows = 100) {
+  const engine = db.engineFor(dbName) || "mariadb";
   sql = sql.replace(/;\s*$/, "").trim();
+
+  if (engine === "tibero") {
+    if (/\bFETCH\s+FIRST\s+\d+\s+ROWS?\s+ONLY\b/i.test(sql)) {
+      return sql.replace(
+        /\bFETCH\s+FIRST\s+(\d+)\s+(ROWS?\s+ONLY)\b/gi,
+        (_, n, rest) => `FETCH FIRST ${Math.min(parseInt(n, 10), maxRows)} ${rest}`,
+      );
+    }
+    if (/\bROWNUM\s*<[=]?\s*\d+/i.test(sql)) {
+      return sql.replace(
+        /\bROWNUM\s*(<[=]?)\s*(\d+)/gi,
+        (_, op, n) => `ROWNUM ${op} ${Math.min(parseInt(n, 10), maxRows)}`,
+      );
+    }
+    return `${sql} FETCH FIRST ${maxRows} ROWS ONLY`;
+  }
+
+  // mariadb / pg
   if (!/\bLIMIT\b/i.test(sql)) return `${sql} LIMIT ${maxRows}`;
   return sql.replace(/\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?/gi, (_, n1, n2) => {
-    if (n2 !== undefined) {
-      return `LIMIT ${n1}, ${Math.min(parseInt(n2, 10), maxRows)}`;
-    }
+    if (n2 !== undefined) return `LIMIT ${n1}, ${Math.min(parseInt(n2, 10), maxRows)}`;
     return `LIMIT ${Math.min(parseInt(n1, 10), maxRows)}`;
   });
 }
 
 async function execDb(name, input) {
   if (name !== "db_query") return { error: `알 수 없는 도구: ${name}` };
-  const raw = (input.sql || "").trim();
+  const raw    = (input.sql || "").trim();
   if (!/^select/i.test(raw)) return { error: "SELECT 쿼리만 허용됩니다." };
-  const sql    = enforceSqlLimit(raw);      // 항상 LIMIT 100 이하 보장
   const dbName = input.db || "local";
+  const sql    = enforceSqlLimit(raw, dbName);   // 엔진별 LIMIT 100 보장
   const rows   = await db.query(sql, input.params || [], dbName);
   return { rows, count: rows.length, db: dbName, appliedSql: sql };
 }
@@ -1250,8 +1296,15 @@ ask_agent("backend",
 - WHERE 조건에 사용된 컬럼·코드값 파악
 
 ### Step 3 — 샘플 데이터 조회
-⚠️ 중요: 모든 SELECT는 시스템이 자동으로 LIMIT 100 이하로 강제합니다.
+⚠️ 중요: 모든 SELECT는 시스템이 자동으로 최대 100건으로 강제합니다.
 전체 데이터 추출 절대 금지. 유효 ID/코드값, 경계값(빈 결과·최대값) 위주 조회.
+
+DB별 문법 (db_query 도구에 표시된 엔진 확인 후 사용):
+  local (Tibero)  → SELECT ... FROM t WHERE ... FETCH FIRST 10 ROWS ONLY
+                     또는  SELECT * FROM (SELECT ... FROM t) WHERE ROWNUM <= 10
+  center (MariaDB)→ SELECT ... FROM t WHERE ... LIMIT 10
+  프로시저 정의 조회 (Tibero): SELECT * FROM ALL_SOURCE WHERE NAME='proc명' ORDER BY LINE FETCH FIRST 100 ROWS ONLY
+  프로시저 정의 조회 (MariaDB): SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_NAME='proc명' LIMIT 1
 
 ### Step 4 — 다른 에이전트 질의 응답
 UI/UISource/Frontend/Backend 에이전트가 테스트 데이터를 요청하면:

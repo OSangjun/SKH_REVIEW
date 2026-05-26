@@ -83,12 +83,60 @@ async function getPool(name) {
   throw new Error(`지원하지 않는 DB 엔진: ${cfg.engine} (${name})`);
 }
 
+// ── Row-limit enforcement ────────────────────────────────────────────────────
+// 엔진별로 적절한 행 수 제한 구문을 적용한다. SELECT 전용.
+//
+//   mariadb / pg : LIMIT N  (N > maxRows 이면 maxRows 로 대체, 없으면 추가)
+//   tibero       : FETCH FIRST N ROWS ONLY  또는  ROWNUM <= N  처리
+//
+function enforceSqlLimitForEngine(sql, engine, maxRows = 100) {
+  sql = sql.replace(/;\s*$/, "").trim();
+
+  if (engine === "tibero") {
+    // ── Tibero / Oracle 방언 ──
+    // 1) FETCH FIRST N ROWS ONLY 이미 있으면 N을 maxRows 이하로 대체
+    if (/\bFETCH\s+FIRST\s+\d+\s+ROWS?\s+ONLY\b/i.test(sql)) {
+      return sql.replace(
+        /\bFETCH\s+FIRST\s+(\d+)\s+(ROWS?\s+ONLY)\b/gi,
+        (_, n, rest) => `FETCH FIRST ${Math.min(parseInt(n, 10), maxRows)} ${rest}`,
+      );
+    }
+    // 2) ROWNUM <= N / ROWNUM < N 이미 있으면 N을 maxRows 이하로 대체
+    if (/\bROWNUM\s*<[=]?\s*\d+/i.test(sql)) {
+      return sql.replace(
+        /\bROWNUM\s*(<[=]?)\s*(\d+)/gi,
+        (_, op, n) => `ROWNUM ${op} ${Math.min(parseInt(n, 10), maxRows)}`,
+      );
+    }
+    // 3) 제한 없음 → FETCH FIRST maxRows ROWS ONLY 추가
+    return `${sql} FETCH FIRST ${maxRows} ROWS ONLY`;
+  }
+
+  // ── MariaDB / PostgreSQL 방언 ──
+  if (!/\bLIMIT\b/i.test(sql)) return `${sql} LIMIT ${maxRows}`;
+  return sql.replace(/\bLIMIT\s+(\d+)(?:\s*,\s*(\d+))?/gi, (_, n1, n2) => {
+    if (n2 !== undefined) {
+      // MySQL 방식: LIMIT offset, count
+      return `LIMIT ${n1}, ${Math.min(parseInt(n2, 10), maxRows)}`;
+    }
+    return `LIMIT ${Math.min(parseInt(n1, 10), maxRows)}`;
+  });
+}
+
+// 외부에서 엔진명 조회용
+function engineFor(name = "local") { return readConfig(name).engine || ""; }
+
 // ── Query ────────────────────────────────────────────────────────────────────
 
 async function query(sql, params = [], name = "local") {
   if (!isConfigured(name)) throw new Error(`${name} DB가 설정되지 않았습니다.`);
 
   const cfg = readConfig(name);
+
+  // SELECT 쿼리에 행 수 제한을 코드 레벨에서 강제 (엔진별 구문 적용)
+  if (/^\s*select\b/i.test(sql)) {
+    sql = enforceSqlLimitForEngine(sql, cfg.engine);
+  }
 
   if (cfg.engine === "tibero") {
     const odbc = require("odbc");
@@ -127,4 +175,4 @@ async function close() {
   }
 }
 
-module.exports = { isConfigured, configuredDbs, query, close };
+module.exports = { isConfigured, configuredDbs, engineFor, query, close };
