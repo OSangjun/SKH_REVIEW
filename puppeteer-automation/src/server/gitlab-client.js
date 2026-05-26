@@ -9,25 +9,18 @@
 const https = require("https");
 const http  = require("http");
 
-const BASE     = (process.env.GITLAB_URL || "").replace(/\/$/, "");
-const TOKEN    = process.env.GITLAB_TOKEN || "";
-const PROJECTS = (process.env.GITLAB_PROJECT || "")
-  .split(",").map((s) => s.trim()).filter(Boolean);
-const PROJECT  = PROJECTS[0] || "";
+function base()       { return (process.env.GITLAB_URL    || "").replace(/\/$/, ""); }
+function token()      { return  process.env.GITLAB_TOKEN   || ""; }
+function projectIds() { return (process.env.GITLAB_PROJECT || "").split(",").map((s) => s.trim()).filter(Boolean); }
 
-function projectId() {
-  return encodeURIComponent(PROJECT);
-}
-
-function getProjectIds() {
-  return PROJECTS;
-}
+function projectId()     { return encodeURIComponent(projectIds()[0] || ""); }
+function getProjectIds() { return projectIds(); }
 
 function request(urlPath) {
   return new Promise((resolve, reject) => {
-    const full = `${BASE}/api/v4${urlPath}`;
+    const full = `${base()}/api/v4${urlPath}`;
     const mod  = full.startsWith("https") ? https : http;
-    const opts = { headers: { "PRIVATE-TOKEN": TOKEN } };
+    const opts = { headers: { "PRIVATE-TOKEN": token() } };
     mod.get(full, opts, (res) => {
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
@@ -45,7 +38,7 @@ function request(urlPath) {
 }
 
 function isConfigured() {
-  return !!(BASE && TOKEN && PROJECTS.length);
+  return !!(base() && token() && projectIds().length);
 }
 
 // List files/directories under `path` in the repository.
@@ -84,7 +77,7 @@ async function searchCode(query) {
 // `project` 는 "group/repo" 형태의 경로 또는 숫자 ID. 함수 내부에서 URL 인코딩.
 
 function isReady() {
-  return !!(BASE && TOKEN);
+  return !!(base() && token());
 }
 
 async function listFilesIn(project, path = "", ref = "main") {
