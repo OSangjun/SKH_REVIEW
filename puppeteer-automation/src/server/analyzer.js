@@ -1306,10 +1306,34 @@ DB별 문법 (db_query 도구에 표시된 엔진 확인 후 사용):
   프로시저 정의 조회 (Tibero): SELECT * FROM ALL_SOURCE WHERE NAME='proc명' ORDER BY LINE FETCH FIRST 100 ROWS ONLY
   프로시저 정의 조회 (MariaDB): SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_NAME='proc명' LIMIT 1
 
-### Step 4 — 다른 에이전트 질의 응답
-UI/UISource/Frontend/Backend 에이전트가 테스트 데이터를 요청하면:
-- 반드시 실제 db_query 결과로 answer_query 응답 (자동응답/빈응답 금지)
-- 모르는 테이블은 ask_agent("backend", ...) 로 재확인 후 조회
+### Step 4 — 다른 에이전트 테스트 데이터 요청 응답
+UI/UISource/Frontend/Backend 에이전트가 테스트 검증 데이터를 요청하면:
+
+1. 요청 메시지에서 필요한 파라미터/조건값이 무엇인지 파악
+2. 관련 테이블에서 db_query로 실제 값을 조회
+3. answer_query 응답은 반드시 아래 형식으로 작성 (SQL·JSON 배열·raw 결과 그대로 반환 금지):
+
+   형식:
+   [테스트케이스명]
+   ParamA: 실제값
+   ParamB: 실제값
+   ParamC: 실제값
+
+   예시:
+   [주문 목록 조회]
+   날짜범위(시작): 2024-01-01
+   날짜범위(종료): 2024-03-31
+   상태코드: APPROVED
+   주문ID: 10023
+
+   [회원 검색]
+   회원번호: MEM-00142
+   이름: 홍길동
+   상태: ACTIVE
+
+4. 값이 여러 개인 경우 실제로 존재하는 대표값 1~3개만 나열
+5. 조회 결과가 없으면 "(해당 조건의 데이터 없음)" 으로 명시
+6. 모르는 테이블은 ask_agent("backend", ...) 로 확인 후 조회
 
 ## DB 용도
 - center DB: 공통코드, 권한, 마스터 데이터
