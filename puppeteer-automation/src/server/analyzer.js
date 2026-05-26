@@ -581,7 +581,7 @@ async function execBrowser(name, input) {
 function agentMsg(agent, label, status, message) {
   send({ type: "analyze-agent", agent, label, status, message });
   const lvl = status === "error" ? "fail" : status === "done" ? "success" : "info";
-  log(lvl, `[${label}] ${message.slice(0, 200)}`);
+  log(lvl, `[${label}] ${message}`);
 }
 
 function phaseMsg(phase, total, label) {
