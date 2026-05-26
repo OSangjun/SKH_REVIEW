@@ -15,7 +15,7 @@
  *     RecordingAgent: 각 테스트 케이스를 브라우저에서 직접 레코딩
  *
  * 에이전트 간 통신 (AgentBus):
- *   ask_agent(target, question) → 대상 에이전트에게 실시간 질의 (응답 대기)
+ *   ask_agent(target, question) → 대상 에이전트에게 실시간 질의 (응답 대기, 90초 타임아웃)
  *   answer_query(query_id, answer) → 수신된 질의에 답변
  *
  *   예시 통신 흐름:
@@ -507,14 +507,26 @@ class AgentBus {
     this._seq     = 0;
   }
   register(name) { this._inbox[name] = []; }
-  ask(from, to, question) {
+
+  // [fix] 90초 타임아웃: 대상 에이전트가 먼저 종료돼도 무한 대기하지 않음
+  ask(from, to, question, timeoutMs = 90000) {
     return new Promise((resolve, reject) => {
       const id = ++this._seq;
-      this._pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this._pending.has(id)) {
+          this._pending.delete(id);
+          resolve(`[타임아웃: ${to} 에이전트가 ${timeoutMs / 1000}초 내에 응답하지 않았습니다.]`);
+        }
+      }, timeoutMs);
+      this._pending.set(id, {
+        resolve: (ans) => { clearTimeout(timer); resolve(ans); },
+        reject:  (err) => { clearTimeout(timer); reject(err); },
+      });
       if (!this._inbox[to]) this._inbox[to] = [];
       this._inbox[to].push({ id, from, question });
     });
   }
+
   drain(name) {
     const msgs = this._inbox[name] || [];
     this._inbox[name] = [];
@@ -524,11 +536,19 @@ class AgentBus {
     const p = this._pending.get(id);
     if (p) { p.resolve(answer); this._pending.delete(id); }
   }
+
+  // [fix] 에이전트 종료 시 inbox 잔여 질의를 일괄 자동 답변 (데드락 방지)
+  closeAgent(name, label) {
+    for (const q of this.drain(name)) {
+      agentMsg(name, label, "progress", `↩ [종료] 질의 ${q.id} 자동 답변`);
+      this.reply(q.id, `[${label} 분석이 완료되어 질의에 답변할 수 없습니다. 현재까지 수집된 findings를 참고하세요.]`);
+    }
+  }
 }
 
 const ASK_AGENT_TOOL = {
   name: "ask_agent",
-  description: "다른 분석 에이전트에게 정보를 요청합니다. 상대방이 응답할 때까지 기다립니다.",
+  description: "다른 분석 에이전트에게 정보를 요청합니다. 상대방이 응답할 때까지 기다립니다 (최대 90초).",
   input_schema: {
     type: "object",
     properties: {
@@ -621,6 +641,8 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       // ── report_findings ──
       if (block.name === "report_findings") {
         agentMsg(name, label, "done", "분석 완료");
+        // [fix] 종료 전 inbox 잔여 질의에 자동 답변 → 대기 에이전트 데드락 방지
+        if (bus) bus.closeAgent(name, label);
         toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "findings submitted" }] });
         messages.push({ role: "user", content: toolResults });
         finished = true;
@@ -688,6 +710,8 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
   }
 
   agentMsg(name, label, "done", "완료");
+  // [fix] 루프 종료 시 inbox 잔여 질의에 자동 답변 → 대기 에이전트 데드락 방지
+  if (bus) bus.closeAgent(name, label);
   return {};
 }
 
