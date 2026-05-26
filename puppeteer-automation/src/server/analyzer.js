@@ -1133,7 +1133,7 @@ async function runAgentTeam(url, pageSource) {
 }
 
 // ── Lead 에이전트 — 취합 및 테스트케이스 도출 ────────────────────────────────
-async function runLeadAgent(url, uiF, frontendF, backendF, dbF) {
+async function runLeadAgent(url, uiF, uiSourceF, frontendF, backendF, dbF) {
   agentMsg("lead", "리드 에이전트", "start", "전체 분석 결과 취합 중");
 
   const findingsSummary = _sharedFindings
@@ -1159,44 +1159,59 @@ async function runLeadAgent(url, uiF, frontendF, backendF, dbF) {
 3. 권한/인증 경계 — 미인증, 권한 없음 (해당하는 경우)
 4. 경계값 — 빈 목록, 최대값
 
-중요: 응답은 반드시 아래 JSON 형식만 출력하세요 (다른 텍스트 없음):
+중요:
+- 분석 데이터가 일부 불완전하더라도 확인된 정보를 최대한 활용해 반드시 테스트케이스를 도출하세요.
+- 응답은 반드시 아래 JSON 형식만 출력하세요 (설명 텍스트, 마크다운 블록 없이 순수 JSON):
 {"testCases":[{"name":"...","steps":[{"action":"navigate","url":"..."}],"testData":{},"expectedResult":"..."}]}`,
     messages: [{
       role: "user",
       content: `분석 URL: ${url}
 
-## 에이전트 발견 목록 (실시간 전달된 내용)
+## 에이전트 발견 목록 (실시간 전달된 내용) — 핵심 참고 자료
 ${findingsSummary || "(없음)"}
 
 ## UI 분석 결과
 \`\`\`json
-${JSON.stringify(uiF, null, 2).slice(0, 2500)}
+${JSON.stringify(uiF, null, 2).slice(0, 6000)}
+\`\`\`
+
+## UI 소스 분석 결과 (3-tier 소스 체인)
+\`\`\`json
+${JSON.stringify(uiSourceF, null, 2).slice(0, 6000)}
 \`\`\`
 
 ## Frontend 분석 결과
 \`\`\`json
-${JSON.stringify(frontendF, null, 2).slice(0, 2500)}
+${JSON.stringify(frontendF, null, 2).slice(0, 6000)}
 \`\`\`
 
 ## Backend 분석 결과
 \`\`\`json
-${JSON.stringify(backendF, null, 2).slice(0, 2500)}
+${JSON.stringify(backendF, null, 2).slice(0, 6000)}
 \`\`\`
 
 ## DB 데이터
 \`\`\`json
-${JSON.stringify(dbF, null, 2).slice(0, 2500)}
+${JSON.stringify(dbF, null, 2).slice(0, 6000)}
 \`\`\`
 
 위 모든 결과를 종합하여 테스트 케이스 JSON을 반환하세요.`,
     }],
   });
 
-  const text = response.content.find((b) => b.type === "text")?.text || "{}";
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  const text = response.content.find((b) => b.type === "text")?.text || "";
   let testCases = [];
+  // 순수 JSON 또는 마크다운 코드블록 내 JSON 모두 처리
+  const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) ||
+                    text.match(/(\{[\s\S]*\})/);
   if (jsonMatch) {
-    try { testCases = JSON.parse(jsonMatch[0]).testCases || []; } catch {}
+    try {
+      testCases = JSON.parse(jsonMatch[1]).testCases || [];
+    } catch (e) {
+      log("fail", `[리드 에이전트] JSON 파싱 실패: ${e.message}\n응답 원문(앞 500자): ${text.slice(0, 500)}`);
+    }
+  } else {
+    log("fail", `[리드 에이전트] JSON 없음. 응답 원문(앞 500자): ${text.slice(0, 500)}`);
   }
 
   agentMsg("lead", "리드 에이전트", "done", `테스트 케이스 ${testCases.length}개 도출 완료`);
@@ -1273,13 +1288,13 @@ async function runAnalysis(url) {
     try { pageSource = await state.activePage.evaluate(() => document.documentElement.outerHTML); } catch {}
 
     // ── Phase 1: 에이전트 팀 병렬 분석 (UI · 소스 · Frontend · Backend · DB) ──
-    const { uiF, frontendF, backendF, dbF } = await runAgentTeam(url, pageSource);
+    const { uiF, uiSourceF, frontendF, backendF, dbF } = await runAgentTeam(url, pageSource);
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
     // ── Phase 2: Lead 에이전트 취합 → 테스트 케이스 도출 → 레코딩 ─────────────
     phaseMsg(2, 2, "테스트 케이스 도출 → 레코딩");
-    const testCases = await runLeadAgent(url, uiF, frontendF, backendF, dbF);
+    const testCases = await runLeadAgent(url, uiF, uiSourceF, frontendF, backendF, dbF);
 
     for (let i = 0; i < testCases.length; i++) {
       if (state.analysisCancelled) break;
