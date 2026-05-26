@@ -180,6 +180,13 @@
           canvas.height = viewport.height;
         }
         recordBtn.disabled = false;
+        // localStorage에 저장된 쿠키가 있으면 서버에 즉시 자동 적용
+        (function applyStoredCookies() {
+          const saved = loadCookiesFromStorage();
+          if (!saved.length) return;
+          send({ type: 'set-cookies', cookies: saved });
+          cookieBtn.classList.add('has-cookies');
+        })();
         break;
 
       case 'frame':
