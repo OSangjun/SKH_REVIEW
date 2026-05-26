@@ -1003,6 +1003,7 @@ body.log-collapsed #log-body { display: none; }
   gap: var(--gap-1);
 }
 .btn-rec-http,
+.btn-rec-dom,
 .btn-rec-json,
 .btn-rec-script {
   flex: 1;
@@ -1370,6 +1371,25 @@ body.log-collapsed #log-body { display: none; }
 }
 .ov-agent-bubble.hidden { display: none; }
 .ov-agent-bubble.fading { opacity: 0; }
+
+/* 에이전트 간 메시지 버블 구조 */
+.bubble-to-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-bottom: 4px;
+  line-height: 1.6;
+}
+.bubble-to-badge.to   { background: rgba(79,142,255,.25); color: #7fb3ff; border: 1px solid rgba(79,142,255,.35); }
+.bubble-to-badge.from { background: rgba(52,211,153,.20); color: #6ee7b7; border: 1px solid rgba(52,211,153,.30); }
+.bubble-body {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 /* 말풍선 꼬리 - 좌측을 향해 아바타를 가리킴 */
 .ov-agent-bubble::after {
   content: "";

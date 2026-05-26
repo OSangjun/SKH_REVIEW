@@ -367,7 +367,7 @@
       }
 
       case 'analyze-agent':
-        updateAgentRow(msg.agent, msg.status, msg.message || '');
+        updateAgentRow(msg.agent, msg.status, msg.message || '', msg.toAgent || null, msg.msgDir || null);
         if (msg.status === 'progress') {
           appendLog('info', null, `[${msg.label}] ${msg.message}`);
         }
@@ -782,7 +782,8 @@
   });
 
   // ── Agent panel helpers ───────────────────────────────────────────────────────
-  const AGENT_ICONS = { pending: '○', running: '↻', done: '✓', error: '✗', start: '↻', progress: '↻' };
+  const AGENT_ICONS  = { pending: '○', running: '↻', done: '✓', error: '✗', start: '↻', progress: '↻' };
+  const AGENT_ABBREV = { 'ui': 'UI', 'ui-source': 'SRC', 'frontend': 'FE', 'backend': 'BE', 'db': 'DB', 'lead': 'LD', 'recording': 'REC' };
   const _bubbleTimers = {};
 
   function resetAgentPanel() {
@@ -792,7 +793,7 @@
       const bubble = row.querySelector('.ov-agent-bubble');
       if (icon)   { icon.className = 'ov-agent-icon pending'; icon.textContent = '○'; }
       if (msg)    msg.textContent = '대기 중';
-      if (bubble) { bubble.textContent = ''; bubble.className = 'ov-agent-bubble hidden'; }
+      if (bubble) { bubble.innerHTML = ''; bubble.className = 'ov-agent-bubble hidden'; }
       row.classList.remove('running');
     });
     Object.keys(_bubbleTimers).forEach(k => {
@@ -802,7 +803,7 @@
     });
   }
 
-  function showBubble(row, text) {
+  function showBubble(row, text, toAgent = null, msgDir = null) {
     const bubble = row.querySelector('.ov-agent-bubble');
     if (!bubble) return;
     const agent = row.dataset.agent;
@@ -813,7 +814,16 @@
       clearTimeout(_bubbleTimers[agent].show);
     }
 
-    bubble.textContent = text.length > 140 ? text.slice(0, 137) + '…' : text;
+    const body = text.length > 140 ? text.slice(0, 137) + '…' : text;
+    if (toAgent && AGENT_ABBREV[toAgent]) {
+      const dirArrow = msgDir === 'from' ? '←' : '→';
+      const abbrev   = AGENT_ABBREV[toAgent];
+      bubble.innerHTML =
+        `<span class="bubble-to-badge ${msgDir === 'from' ? 'from' : 'to'}">${dirArrow} ${abbrev}</span>` +
+        `<span class="bubble-body">${esc(body)}</span>`;
+    } else {
+      bubble.textContent = body;
+    }
     bubble.className = 'ov-agent-bubble';
 
     // 10초 후 페이드아웃 → 숨김
@@ -821,14 +831,14 @@
       bubble.classList.add('fading');
       const hideTimer = setTimeout(() => {
         bubble.className = 'ov-agent-bubble hidden';
-        bubble.textContent = '';
+        bubble.innerHTML = '';
       }, 400);
       _bubbleTimers[agent] = { fade: null, show: hideTimer };
     }, 10000);
     _bubbleTimers[agent] = { fade: fadeTimer, show: null };
   }
 
-  function updateAgentRow(agent, status, message) {
+  function updateAgentRow(agent, status, message, toAgent = null, msgDir = null) {
     const row = ovAgents.querySelector(`[data-agent="${CSS.escape(agent)}"]`);
     if (!row) return;
     const icon = row.querySelector('.ov-agent-icon');
@@ -841,11 +851,9 @@
     }
     if (msg) msg.textContent = message.slice(0, 50);
 
-    // running 행 하이라이트
     row.classList.toggle('running', cls === 'running');
 
-    // 말풍선: progress/start/done/error 메시지 표시
-    if (message && status !== 'pending') showBubble(row, message);
+    if (message && status !== 'pending') showBubble(row, message, toAgent, msgDir);
   }
 
   // ── Analyze ────────────────────────────────────────────────────────────────────

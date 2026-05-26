@@ -578,8 +578,8 @@ async function execBrowser(name, input) {
 
 // ── 공통 에이전트 러너 ──────────────────────────────────────────────────────
 
-function agentMsg(agent, label, status, message) {
-  send({ type: "analyze-agent", agent, label, status, message });
+function agentMsg(agent, label, status, message, meta = {}) {
+  send({ type: "analyze-agent", agent, label, status, message, ...meta });
   const lvl = status === "error" ? "fail" : status === "done" ? "success" : "info";
   log(lvl, `[${label}] ${message}`);
 }
@@ -605,10 +605,11 @@ const AGENT_ORDER = { "ui": 1, "ui-source": 2, "frontend": 3, "backend": 4, "db"
 // ── 에이전트 간 실시간 통신 버스 ────────────────────────────────────────────────
 class AgentBus {
   constructor() {
-    this._inbox   = {};        // agentName → Array<{id, from, question}>
-    this._pending = new Map(); // queryId → {resolve, reject}
-    this._seq     = 0;
-    this._closed  = new Map(); // agentName → label (종료된 에이전트 추적)
+    this._inbox     = {};        // agentName → Array<{id, from, question}>
+    this._pending   = new Map(); // queryId → {resolve, reject}
+    this._queryFrom = new Map(); // queryId → from (answer_query 시 발신자 추적용)
+    this._seq       = 0;
+    this._closed    = new Map(); // agentName → label (종료된 에이전트 추적)
   }
   register(name) { this._inbox[name] = []; }
 
@@ -617,7 +618,7 @@ class AgentBus {
       // 대상 에이전트가 이미 종료된 경우 즉시 응답 (90초 대기 없음)
       if (this._closed.has(to)) {
         const label = this._closed.get(to);
-        agentMsg(from, from, "progress", `↩ [즉시] ${to} 에이전트 이미 종료 — 자동 응답`);
+        agentMsg(from, from, "progress", `↩ [즉시] ${to} 에이전트 이미 종료 — 자동 응답`, { toAgent: to, msgDir: "to" });
         resolve(`[${label} 분석이 완료되어 질의에 답변할 수 없습니다. 현재까지 수집된 findings를 참고하세요.]`);
         return;
       }
@@ -635,6 +636,7 @@ class AgentBus {
       });
       if (!this._inbox[to]) this._inbox[to] = [];
       this._inbox[to].push({ id, from, question });
+      this._queryFrom.set(id, from);
     });
   }
 
@@ -647,6 +649,7 @@ class AgentBus {
     const p = this._pending.get(id);
     if (p) { p.resolve(answer); this._pending.delete(id); }
   }
+  queryFrom(id) { return this._queryFrom.get(id) ?? null; }
 
   // 에이전트 종료 시:
   //   1. _closed에 등록 → 이후 도착하는 질의는 ask()에서 즉시 응답
@@ -654,7 +657,7 @@ class AgentBus {
   closeAgent(name, label) {
     this._closed.set(name, label);
     for (const q of this.drain(name)) {
-      agentMsg(name, label, "progress", `↩ [종료] 질의 ${q.id} 자동 답변`);
+      agentMsg(name, label, "progress", `↩ [종료] 질의 ${q.id} 자동 답변`, { toAgent: q.from, msgDir: "to" });
       this.reply(q.id, `[${label} 분析이 완료되어 질의에 답변할 수 없습니다. 현재까지 수집된 findings를 참고하세요.]`);
     }
   }
@@ -674,7 +677,7 @@ class AgentBus {
     while (Date.now() < deadline) {
       if (predecessors.every((n) => this._closed.has(n))) break;
       for (const q of this.drain(name)) {
-        agentMsg(name, label, "progress", `↩ [대기중] 질의 ${q.id} 자동 답변`);
+        agentMsg(name, label, "progress", `↩ [대기중] 질의 ${q.id} 자동 답변`, { toAgent: q.from, msgDir: "to" });
         this.reply(q.id, `[${label} 분析이 완료되어 대기 중입니다. 현재까지 수집된 findings를 참고하세요.]`);
       }
       await new Promise((r) => setTimeout(r, 500));
@@ -819,10 +822,10 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       // ── ask_agent: 다른 에이전트에게 질의 (응답 대기) ──
       if (block.name === "ask_agent" && bus) {
         const { target, question } = block.input;
-        agentMsg(name, label, "progress", `→ [${target}] 질의: ${question.slice(0, 80)}`);
+        agentMsg(name, label, "progress", `→ [${target}] 질의: ${question.slice(0, 80)}`, { toAgent: target, msgDir: "to" });
         try {
           const answer = await bus.ask(name, target, question);
-          agentMsg(name, label, "progress", `← [${target}] 응답 수신`);
+          agentMsg(name, label, "progress", `← [${target}] 응답 수신`, { toAgent: target, msgDir: "from" });
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: String(answer) }] });
         } catch (e) {
           toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: `오류: ${e.message}` }], is_error: true });
@@ -833,8 +836,9 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       // ── answer_query: 수신된 질의에 답변 ──
       if (block.name === "answer_query" && bus) {
         const { query_id, answer } = block.input;
+        const queryFrom = bus.queryFrom(query_id);
         bus.reply(query_id, answer);
-        agentMsg(name, label, "progress", `↩ 질의 ${query_id} 답변 전송`);
+        agentMsg(name, label, "progress", `↩ 질의 ${query_id} 답변 전송`, { toAgent: queryFrom, msgDir: "to" });
         toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "답변 전송됨" }] });
         continue;
       }
