@@ -908,45 +908,28 @@ async function runUIAgent(url, pageSource, bus) {
       WRITE_REPORT_TOOL,
       REPORT_TOOL,
     ],
-    systemPrompt: `당신은 웹 UI 분석 에이전트입니다.
-현재 페이지의 UI 구조를 분석하여 비즈니스 로직을 파악합니다.
+    systemPrompt: `당신은 웹 UI 분析 에이전트입니다.
 
-분석 방법:
-1. browser_get_page_info로 입력 요소/버튼 목록 수집
+분析:
+1. browser_get_page_info로 입력요소·버튼 수집
 2. browser_screenshot으로 화면 확인
-3. 발견사항마다 send_finding 호출 (폼 필드, 버튼 역할, 화면 목적 등)
+3. 발견마다 send_finding 호출 (폼필드·버튼역할·화면목적)
 
-에이전트 협업 (ask_agent 도구 활용):
-- 조회 화면에서 실제 조회 조건 데이터가 필요하면 DB 에이전트에게 요청하세요.
-  예: ask_agent("db", "주문 목록 조회 화면의 테스트 데이터가 필요합니다. 조회 조건: 날짜범위, 상태코드. 유효한 샘플 값을 제공해주세요.")
-- DB 에이전트가 응답하면 그 데이터를 send_finding에 포함하고 실제 조회 가능한 케이스에 활용하세요.
-- 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
+협업: 필요시 ask_agent("db","조회 조건 샘플 데이터 요청"), 수신 질의는 answer_query로 답변
 
+write_report 전: ask_agent("db","[시나리오]:[필요 조건값/ID/코드값]")로 테스트데이터 요청 → 리포트 '## 테스트 케이스별 필요 데이터' 포함 (미설정시 '(DB 미확인)')
 
-테스트 데이터 확인 (write_report 전 필수):
-소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
-  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
-DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
-(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
-분석 완료 후 순서:
-1. write_report 도구로 마크다운 리포트 작성 (형식 예시):
-   # UI 분석 리포트
-   ## 페이지 개요
-   ## 화면 구성 요소 (폼 필드, 버튼 등)
-   ## 사용자 액션
-   ## 테스트 데이터 (DB 에이전트 응답 포함)
-   ## 테스트 관점 메모
-   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
-2. report_findings 도구로 구조화 JSON 제출:
-   - pageTitle, purpose, formFields, buttons, sections, userActions, testData`,
+완료:
+1. write_report: # UI 분析 리포트 / ## 페이지 개요 / ## 화면구성요소(폼필드·버튼) / ## 사용자액션 / ## 테스트 케이스별 필요 데이터
+2. report_findings: pageTitle, purpose, formFields, buttons, sections, userActions, testData`,
     userMessage: `현재 URL: ${url}
 
-현재 페이지 HTML (일부):
+HTML(일부):
 \`\`\`html
 ${pageSource.slice(0, 6000)}
 \`\`\`
 
-UI를 분석하여 발견사항을 send_finding으로 전달하고, 완료 후 report_findings를 호출하세요.`,
+send_finding으로 발견사항 전달 후 report_findings 호출.`,
     execTool: async (name, input) => {
       if (name === "browser_get_page_info") {
         return state.activePage.evaluate(() => {
@@ -999,74 +982,33 @@ async function runUISourceAgent(url, bus) {
     name: "ui-source", label: "UI 소스 분석",
     bus,
     tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
-    systemPrompt: `당신은 3-tier 웹 시스템의 소스코드를 가로지르며 분석하는 에이전트입니다.
+    systemPrompt: `당신은 3-tier 소스 추적 에이전트입니다.
+URL origin 다음 첫 path 세그먼트가 프로젝트명. 브랜치는 get_branch_for_project.
 
-목표:
-- 현재 화면(UI)에서 호출되는 API 를 따라 중간 계층(Static Spring/BFF)과
-  최종 백엔드 계층까지 소스를 추적하여 비즈니스 로직을 파악한다.
+[L0 — UI Vue] 프로젝트="${uiProject}", 브랜치="${uiBranch}", 경로="${urlPath}"
+1. gitlab_list_files_in 루트 파악
+2. gitlab_search_code_in으로 라우터에서 "${urlPath}" 검색 → 매핑 컴포넌트 읽기
+3. import 추적 → API 클라이언트(src/api/) 엔드포인트 추출
+4. send_finding(findingType:"api_endpoint", description에 method/path/파라미터)
 
-용어:
-- "프로젝트"는 URL 의 origin 다음 첫 path 세그먼트.
-  예: https://app.example.com/order/list  → 프로젝트 = "order"
-       /payment/charge                     → 프로젝트 = "payment"
-- "브랜치"는 get_branch_for_project 도구로 조회 (CLAUDE.md 매핑표 기반).
+[L1 — 중간계층] 각 L0 엔드포인트 *모두*:
+1. derive_project_from_url → get_branch_for_project
+2. gitlab_search_code_in으로 핸들러(@GetMapping 등) 검색
+3. 다음 단계 API(RestTemplate/WebClient/Feign) 추출 → send_finding
 
-분석 절차 (3 levels):
+[L2 — 백엔드] 각 L1 엔드포인트 *모두*:
+1. derive_project_from_url → get_branch_for_project
+2. 컨트롤러→서비스→매퍼/리포지터리 추적
+3. 비즈니스로직/DB테이블/권한/에러 → send_finding
 
-[Level 0 — UI Vue 프로젝트]
-프로젝트="${uiProject}", 브랜치="${uiBranch}", 현재 경로="${urlPath}"
-1. gitlab_list_files_in 으로 루트 구조 파악
-2. gitlab_search_code_in 으로 Vue Router 에서 "${urlPath}" 매칭되는 라우트 검색
-3. 매핑된 .vue 컴포넌트와 import 한 API 클라이언트(src/api/, src/services/) 읽기
-4. 호출되는 API 엔드포인트 추출 → send_finding(findingType: "api_endpoint",
-   description 에 method/path/요청파라미터 포함)
+write_report 전: ask_agent("db","[시나리오]:[필요 조건값/ID]")로 테스트데이터 요청 → '## 테스트 케이스별 필요 데이터' 포함 (미설정시 '(DB 미확인)')
 
-[Level 1 — 중간 계층 (Static Spring / BFF)]
-각 L0 엔드포인트에 대해 *모두* 다음을 수행 (병렬 의미 = 빠뜨리지 말 것):
-1. derive_project_from_url 로 엔드포인트 경로에서 프로젝트명 도출
-2. get_branch_for_project 로 브랜치 조회
-3. gitlab_search_code_in 으로 해당 핸들러(@GetMapping/@PostMapping 등) 검색
-4. 핸들러가 호출하는 다음 단계 API (RestTemplate/WebClient/Feign 등) 추출
-5. 발견되는 모든 엔드포인트 → send_finding(findingType: "api_endpoint")
+완료:
+1. write_report: # UI 소스 분析 리포트 / ## L0 / ## L1 / ## L2 / ## API목록 / ## 비즈니스로직 / ## 테스트 케이스별 필요 데이터
+2. report_findings: { levels:[{level,project,branch,files,apiEndpoints},...], apiEndpoints:[...] }`,
+    userMessage: `URL: ${url} / 프로젝트: ${uiProject} / 브랜치: ${uiBranch} / 경로: ${urlPath}
 
-[Level 2 — 백엔드 계층]
-각 L1 엔드포인트에 대해 *모두* 동일하게:
-1. derive_project_from_url → 프로젝트 도출
-2. get_branch_for_project → 브랜치
-3. 컨트롤러 → 서비스 → 매퍼/리포지토리 추적
-4. 비즈니스 로직 / DB 테이블 / 권한 / 에러 시나리오 → send_finding 으로 적시 전달
-
-
-테스트 데이터 확인 (write_report 전 필수):
-소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
-  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
-DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
-(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
-종료:
-1. write_report 도구로 마크다운 리포트 작성:
-   # UI 소스 분석 리포트
-   ## Level 0: UI 프로젝트 (컴포넌트, API 클라이언트)
-   ## Level 1: 중간 계층 (BFF/Static-Spring, 엔드포인트)
-   ## Level 2: 백엔드 계층 (컨트롤러, 서비스, DB 테이블)
-   ## 전체 API 엔드포인트 목록
-   ## 비즈니스 로직 요약
-   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
-2. report_findings 호출. findings 포함 내용:
-   {
-     levels: [
-       { level: 0, project, branch, files, apiEndpoints: [{method, path}] },
-       { level: 1, projects: [{project, branch, files, apiEndpoints}] },
-       { level: 2, projects: [{project, branch, files, businessLogic, dbTables}] }
-     ],
-     apiEndpoints: [...],
-   }`,
-    userMessage: `시작 URL: ${url}
-시작 프로젝트: ${uiProject}
-시작 브랜치: ${uiBranch}
-현재 경로: ${urlPath}
-
-위 systemPrompt 의 Level 0 → 1 → 2 절차를 따라 분석한 뒤 send_finding 으로
-중간 발견을 적시 전달하고, 모든 레벨이 끝나면 report_findings 를 호출하세요.`,
+L0→L1→L2 절차로 분析, send_finding으로 중간 발견 전달, 완료 후 report_findings 호출.`,
     execTool: execGitlab,
     maxTurns: 60,
   });
@@ -1086,58 +1028,25 @@ async function runFrontendAgent(url, bus) {
     name: "frontend", label: "Frontend 분석",
     bus,
     tools: [...GITLAB_TOOLS, ...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
-    systemPrompt: `당신은 Vue.js 프론트엔드 소스 분석 에이전트입니다.
-현재 URL 경로에 해당하는 Vue 컴포넌트를 추적하여 UI→API까지 분석합니다.
+    systemPrompt: `당신은 Vue.js 프론트엔드 소스 分析 에이전트입니다.
+GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
 
-## 프로젝트 탐색 전략
+분析:
+1. 각 프로젝트에서 gitlab_search_code_in으로 Vue Router에서 현재 경로 검색
+2. 매핑 컴포넌트 읽기(gitlab_get_file_in) → import 추적(하위컴포넌트·composables·src/api/)
+3. API 클라이언트에서 엔드포인트 추출
+결과 없으면 다음 프로젝트로 전환. 발견 즉시 send_finding: api_endpoint / validation_rule / business_logic
 
-설정된 GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
-이 목록의 모든 프로젝트를 순서대로 검색하여 프론트엔드 소스를 찾으세요.
+협업: 수신 질의 answer_query로 즉시 답변
 
-탐색 방법:
-- gitlab_search_code_in(projectId, "검색어") 로 각 프로젝트 검색
-- gitlab_list_files_in(projectId, "") 로 루트 구조 확인
-- gitlab_get_file_in(projectId, "파일경로") 로 파일 읽기
-- 첫 번째 프로젝트에서 결과가 없으면 다음 프로젝트로 전환
+write_report 전: ask_agent("db","[시나리오]:[필요 조건값/ID]")로 테스트데이터 요청 → '## 테스트 케이스별 필요 데이터' 포함
 
-분석 순서:
-1. 각 프로젝트에서 gitlab_search_code_in 으로 Vue Router에서 현재 경로("${urlPath}") 검색
-2. 매핑된 Vue 컴포넌트 파일 읽기 (gitlab_get_file_in)
-3. 컴포넌트의 import 문 추적:
-   - 하위 컴포넌트 (src/components/ 등)
-   - Composables / hooks (src/composables/)
-   - API 클라이언트 파일 (src/api/, src/services/)
-4. API 클라이언트에서 엔드포인트 경로 추출
+완료:
+1. write_report: # Frontend 分析 리포트 / ## 라우터→컴포넌트 / ## API목록 / ## 유효성검증 / ## 폼필드 / ## 비즈니스로직 / ## 테스트 케이스별 필요 데이터
+2. report_findings: routerFile, componentFile, componentFiles, apiEndpoints, validationRules, formFields, businessLogic`,
+    userMessage: `URL: ${url} (경로: ${urlPath}) / 프로젝트 IDs: [${projectIds.join(", ")}]
 
-비즈니스 로직 발견 시 즉시 send_finding 호출:
-- API 엔드포인트 발견 → findingType: "api_endpoint"
-- 유효성 검증 규칙 발견 → findingType: "validation_rule"
-- 비즈니스 로직 발견 → findingType: "business_logic"
-
-에이전트 협업: 다른 에이전트로부터 질의가 도착하면 answer_query로 답변하세요.
-
-
-테스트 데이터 확인 (write_report 전 필수):
-소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
-  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
-DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
-(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
-분석 완료 후 순서:
-1. write_report 도구로 마크다운 리포트 작성:
-   # Frontend 분석 리포트
-   ## 라우터 → 컴포넌트 매핑
-   ## API 엔드포인트 목록
-   ## 유효성 검증 규칙
-   ## 폼 필드 목록
-   ## 비즈니스 로직
-   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
-2. report_findings 도구로 구조화 JSON 제출:
-   - routerFile, componentFile, componentFiles, apiEndpoints, validationRules, formFields, businessLogic`,
-    userMessage: `현재 페이지 URL: ${url} (경로: ${urlPath})
-탐색할 프로젝트 IDs: [${projectIds.join(", ")}]
-
-각 프로젝트에서 Vue Router → 컴포넌트 → API 클라이언트 순으로 추적하고,
-발견사항을 send_finding으로 전달한 뒤 write_report → report_findings 순으로 완료하세요.`,
+Vue Router→컴포넌트→API 클라이언트 추적, send_finding → write_report → report_findings.`,
     execTool: execGitlab,
   });
 }
@@ -1158,83 +1067,37 @@ async function runBackendAgent(frontendFindings, bus, url) {
     return { skipped: true, businessLogic: [], dbTables: [], authRules: [] };
   }
 
-  const projectsNote = `탐색할 프로젝트 IDs: [${projectIds.join(", ")}]
-각 프로젝트를 순서대로 검색하여 관련 소스를 찾으세요. 한 프로젝트에서 결과가 없으면 다음 프로젝트로 전환하세요.`;
 
   const userMessage = endpoints.length
-    ? `Frontend 분석 결과 (API 엔드포인트):
-\`\`\`json
-${JSON.stringify({ apiEndpoints: endpoints, validationRules: frontendFindings.validationRules || [] }, null, 2).slice(0, 4000)}
-\`\`\`
-
-${projectsNote}
-
-각 엔드포인트의 백엔드 컨트롤러/서비스를 찾아 분석하고,
-발견사항을 send_finding으로 전달하면서 report_findings를 호출하세요.`
-    : `분석 대상 URL: ${url || "알 수 없음"}
-
-${projectsNote}
-
-Frontend 에이전트가 아직 엔드포인트를 제공하지 않았습니다.
-URL 경로를 기반으로 직접 백엔드 소스를 탐색하거나,
-다른 에이전트의 질의(answer_query)에 응답하면서 report_findings를 호출하세요.`;
+    ? `엔드포인트: ${JSON.stringify(endpoints).slice(0, 2000)} / 프로젝트 IDs: [${projectIds.join(", ")}]
+컨트롤러/서비스 추적 후 send_finding → report_findings.`
+    : `URL: ${url || "알 수 없음"} / 프로젝트 IDs: [${projectIds.join(", ")}]
+URL 기반으로 소스 탐색 또는 answer_query 응답 후 report_findings 호출.`;
 
   return runAgent({
-    name: "backend", label: "Backend 분석",
+    name: "backend", label: "Backend 분析",
     bus,
     tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
-    systemPrompt: `당신은 백엔드 소스 분석 에이전트입니다.
-프론트엔드 에이전트가 발견한 API 엔드포인트를 바탕으로 백엔드 컨트롤러/서비스를 분석합니다.
+    systemPrompt: `당신은 백엔드 소스 分析 에이전트입니다.
+GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
 
-## 프로젝트 탐색 전략
+탐색(gitlab_*_in 도구):
+1. 각 API 엔드포인트로 프로젝트 순서대로 핸들러 검색
+   Spring: @GetMapping/@PostMapping / Node: router.get/post
+   결과 없으면 다음 프로젝트로 전환, 포기 금지
+2. 컨트롤러→서비스→리포지터리/매퍼 추적
+3. DB쿼리·테이블명·비즈니스조건 파악
+발견 즉시 send_finding: db_table / auth_rule / error_scenario / business_logic
 
-설정된 GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
-이 목록의 모든 프로젝트를 순서대로 검색하여 백엔드 소스를 찾으세요.
+협업:
+- 수신 질의 answer_query로 즉시 답변
+- DB 에이전트 쿼리 요청 시 소스 내 SQL/JPQL/마이바티스 쿼리·프로시저·테이블명 추출하여 답변
 
-탐색 방법 (gitlab_*_in 도구 사용):
-- gitlab_search_code_in(projectId, "검색어") — 각 프로젝트에서 코드 검색
-- gitlab_list_files_in(projectId, "") — 루트 구조 확인
-- gitlab_get_file_in(projectId, "파일경로") — 파일 읽기
+write_report 전: ask_agent("db","[시나리오]:[필요 조건값/ID]")로 테스트데이터 요청 → '## 테스트 케이스별 필요 데이터' 포함
 
-탐색 순서:
-1. 각 API 엔드포인트 경로로 모든 프로젝트에서 순서대로 검색
-   (Spring: "@GetMapping/@PostMapping", Node: "router.get/router.post")
-   - 결과 없으면 다음 프로젝트 ID로 전환, 포기하지 마세요
-2. 소스 발견 시: 컨트롤러 → 서비스 → 리포지터리/매퍼 순서로 추적
-3. 각 파일의 import/의존성을 따라가며 계속 탐색
-4. DB 쿼리, 테이블명, 비즈니스 조건 파악
-
-발견 시 즉시 send_finding 호출:
-- DB 테이블 → findingType: "db_table"
-- 권한/인증 규칙 → findingType: "auth_rule"
-- 에러 시나리오 → findingType: "error_scenario"
-- 비즈니스 로직 → findingType: "business_logic"
-
-에이전트 협업 (팀 모드):
-- DB 에이전트나 UI 에이전트로부터 질의가 도착하면 answer_query로 즉시 답변하세요.
-  예: DB 에이전트가 "주문 테이블의 상태코드 컬럼명을 알려주세요" 질의 → 소스 확인 후 답변
-- DB 에이전트가 소스코드 내 SQL/JPQL/마이바티스 쿼리 전체를 요청하면, 관련 파일에서 쿼리를 추출하여 답변하세요.
-  포함 항목: SELECT/INSERT/UPDATE/DELETE 쿼리, 프로시저·함수 호출, 사용 테이블명, 파라미터
-- Frontend 에이전트에게 ask_agent로 엔드포인트 정보를 요청할 수도 있습니다.
-
-
-테스트 데이터 확인 (write_report 전 필수):
-소스/화면 분析이 완료되면, 발견한 테스트 시나리오별 검증에 필요한 실제 데이터를 DB 에이전트에게 요청하세요:
-  ask_agent("db", "다음 테스트 케이스 검증을 위한 실제 데이터를 조회해주세요:\n[시나리오명]: [필요한 조건값/ID/코드값 설명]")
-DB 에이전트 응답 데이터를 리포트 '## 테스트 케이스별 필요 데이터' 섹션에 반드시 포함하세요.
-(DB 미설정이거나 응답 없으면 '(DB 데이터 미확인)'으로 표기)
-분석 완료 후 순서:
-1. write_report 도구로 마크다운 리포트 작성:
-   # Backend 분석 리포트
-   ## 분석 대상 엔드포인트
-   ## 컨트롤러 → 서비스 → 리포지터리 추적 결과
-   ## DB 테이블 및 주요 컬럼
-   ## 비즈니스 로직 (조건, 분기, 에러 처리)
-   ## 권한/인증 규칙
-   ## 테스트 시나리오 제안
-   ## 테스트 케이스별 필요 데이터 (DB 에이전트 응답)
-2. report_findings 도구로 구조화 JSON 제출:
-   - controllerFiles, businessLogic, dbTables, authRules, errorScenarios, testScenarios`,
+완료:
+1. write_report: # Backend 分析 리포트 / ## 대상엔드포인트 / ## 컨트롤러추적 / ## DB테이블 / ## 비즈니스로직 / ## 권한/인증 / ## 테스트시나리오 / ## 테스트 케이스별 필요 데이터
+2. report_findings: controllerFiles, businessLogic, dbTables, authRules, errorScenarios, testScenarios`,
     userMessage,
     execTool: execGitlab,
   });
@@ -1253,106 +1116,43 @@ async function runDBAgent(frontendFindings, backendFindings, bus, url) {
   const entityHints = (frontendFindings.apiEndpoints || []).map((e) => e.path).join(", ");
 
   const userMessage = dbTables.length
-    ? `Backend 분析 결과 (참고용 테이블 힌트):
-\`\`\`json
-${JSON.stringify(dbTables, null, 2).slice(0, 2000)}
-\`\`\`
-
-API 경로 힌트: ${entityHints}
-설정된 DB: ${configuredDbs.join(", ")}
-
-⚠️ 위 테이블 힌트는 참고용입니다.
-Step 1 지시대로 먼저 ask_agent("backend", ...) 로 실제 소스코드 내 쿼리를 수집한 후,
-쿼리에서 사용하는 테이블·프로시저를 분析하고 샘플 데이터를 조회하세요.
-모든 SELECT는 자동으로 LIMIT 100 이하로 제한됩니다.`
-    : `분析 대상 URL: ${url || "알 수 없음"}
-설정된 DB: ${configuredDbs.join(", ")}
-
-Step 1 지시대로 먼저 ask_agent("backend", ...) 로 소스코드 내 SQL/JPQL/마이바티스 쿼리를 수집하세요.
-수집한 쿼리에서 테이블·프로시저를 파악한 뒤 샘플 데이터를 조회하고 report_findings를 호출하세요.
-모든 SELECT는 자동으로 LIMIT 100 이하로 제한됩니다.`;
+    ? `Backend 힌트 테이블: ${JSON.stringify(dbTables).slice(0, 500)} / API힌트: ${entityHints} / DB: ${configuredDbs.join(", ")}
+Step1 지시대로 ask_agent("backend",...)로 실제 쿼리 먼저 수집. SELECT 자동 100건 제한.`
+    : `URL: ${url || "알 수 없음"} / DB: ${configuredDbs.join(", ")}
+ask_agent("backend",...)로 쿼리 수집 후 분析. SELECT 자동 100건 제한.`;
 
   return runAgent({
     name: "db", label: "DB 분석",
     bus,
     tools: [...buildDbTools(configuredDbs), SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
-    systemPrompt: `당신은 DB 데이터 분析 에이전트입니다.
-백엔드 소스코드에 포함된 실제 쿼리를 기반으로 DB 구조를 파악하고,
-테스트 검증에 필요한 샘플 데이터를 조회합니다.
+    systemPrompt: `당신은 DB 데이터 分析 에이전트입니다.
+local=Tibero, center=MariaDB. SELECT는 시스템이 자동으로 최대 100건 강제.
 
-## 분析 절차
+Step1 — 쿼리 수집 (시작 즉시)
+ask_agent("backend","이 화면 관련 SQL/JPQL/마이바티스 XML 쿼리 모두 제공. 포함: SELECT/INSERT/UPDATE/DELETE, 프로시저·함수, 테이블명, 조인")
 
-### Step 1 — 백엔드 쿼리 수집 (분析 시작 즉시)
-ask_agent("backend",
-  "이 화면 관련 백엔드 소스코드에 포함된 SQL/JPQL/마이바티스 XML 쿼리를 모두 알려주세요.
-   포함 항목: SELECT/INSERT/UPDATE/DELETE 쿼리, 프로시저·함수 호출, 사용 테이블명, 조인 관계")
+Step2 — 쿼리 分析
+테이블 목록·프로시저/함수→정의 조회·조인 관계·WHERE 컬럼/코드값 파악
 
-### Step 2 — 쿼리 분析
-수신한 쿼리에서:
-- 사용 테이블 목록 추출
-- 프로시저/함수 호출 여부 확인
-  → 프로시저/함수 존재 시 정의 조회 (information_schema.ROUTINES 또는 해당 DB 카탈로그)
-- 테이블 간 조인 관계 파악
-- WHERE 조건에 사용된 컬럼·코드값 파악
+Step3 — 샘플 조회
+Tibero: SELECT ... FETCH FIRST 10 ROWS ONLY  또는  WHERE ROWNUM <= 10
+MariaDB: SELECT ... LIMIT 10
+프로시저(Tibero): SELECT * FROM ALL_SOURCE WHERE NAME='proc' ORDER BY LINE FETCH FIRST 100 ROWS ONLY
+프로시저(MariaDB): SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_NAME='proc' LIMIT 1
 
-### Step 3 — 샘플 데이터 조회
-⚠️ 중요: 모든 SELECT는 시스템이 자동으로 최대 100건으로 강제합니다.
-전체 데이터 추출 절대 금지. 유효 ID/코드값, 경계값(빈 결과·최대값) 위주 조회.
+Step4 — 타 에이전트 테스트 데이터 요청 응답
+db_query로 실제 값 조회 후 answer_query를 아래 형식으로만 응답 (SQL·JSON 배열 직접 반환 금지):
+[테스트케이스명]
+ParamA: 실제값
+ParamB: 실제값
+대표값 1~3개. 없으면 "(해당 데이터 없음)". 모르는 테이블은 ask_agent("backend",...) 후 조회.
 
-DB별 문법 (db_query 도구에 표시된 엔진 확인 후 사용):
-  local (Tibero)  → SELECT ... FROM t WHERE ... FETCH FIRST 10 ROWS ONLY
-                     또는  SELECT * FROM (SELECT ... FROM t) WHERE ROWNUM <= 10
-  center (MariaDB)→ SELECT ... FROM t WHERE ... LIMIT 10
-  프로시저 정의 조회 (Tibero): SELECT * FROM ALL_SOURCE WHERE NAME='proc명' ORDER BY LINE FETCH FIRST 100 ROWS ONLY
-  프로시저 정의 조회 (MariaDB): SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_NAME='proc명' LIMIT 1
+DB 용도: center=공통코드·권한·마스터, local=업무/도메인 데이터
+데이터 발견 시 send_finding(findingType:"db_table")
 
-### Step 4 — 다른 에이전트 테스트 데이터 요청 응답
-UI/UISource/Frontend/Backend 에이전트가 테스트 검증 데이터를 요청하면:
-
-1. 요청 메시지에서 필요한 파라미터/조건값이 무엇인지 파악
-2. 관련 테이블에서 db_query로 실제 값을 조회
-3. answer_query 응답은 반드시 아래 형식으로 작성 (SQL·JSON 배열·raw 결과 그대로 반환 금지):
-
-   형식:
-   [테스트케이스명]
-   ParamA: 실제값
-   ParamB: 실제값
-   ParamC: 실제값
-
-   예시:
-   [주문 목록 조회]
-   날짜범위(시작): 2024-01-01
-   날짜범위(종료): 2024-03-31
-   상태코드: APPROVED
-   주문ID: 10023
-
-   [회원 검색]
-   회원번호: MEM-00142
-   이름: 홍길동
-   상태: ACTIVE
-
-4. 값이 여러 개인 경우 실제로 존재하는 대표값 1~3개만 나열
-5. 조회 결과가 없으면 "(해당 조건의 데이터 없음)" 으로 명시
-6. 모르는 테이블은 ask_agent("backend", ...) 로 확인 후 조회
-
-## DB 용도
-- center DB: 공통코드, 권한, 마스터 데이터
-- local DB: 업무/도메인 데이터 (거래, 계정, 사용자 등)
-
-데이터 발견 시 send_finding 호출 (findingType: "db_table")
-
-분析 완료 후 순서:
-1. write_report 도구로 마크다운 리포트 작성:
-   # DB 分析 리포트
-   ## 백엔드 수집 쿼리 목록 (원본)
-   ## 사용 테이블 목록 및 구조
-   ## 프로시저/함수 목록 및 정의
-   ## 샘플 데이터 (테이블별, 최대 100건)
-   ## 유효 ID/코드 목록 (테스트에 사용 가능한 값)
-   ## 에이전트별 테스트 데이터 요청 처리 내역
-   ## 테스트 데이터 활용 가이드
-2. report_findings 도구로 구조화 JSON 제출:
-   - collectedQueries, tables, procedures, testData, validIds, agentDataProvided, summary`,
+완료:
+1. write_report: # DB 分析 리포트 / ## 수집쿼리 / ## 테이블목록 / ## 프로시저/함수 / ## 샘플데이터 / ## 유효ID/코드 / ## 에이전트요청처리 / ## 활용가이드
+2. report_findings: collectedQueries, tables, procedures, testData, validIds, agentDataProvided, summary`,
     userMessage,
     execTool: execDb,
   });
@@ -1412,37 +1212,20 @@ async function runLeadAgent(url) {
     name: "lead", label: "리드 에이전트",
     tools: [READ_REPORT_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 QA 리드 에이전트입니다.
-각 분석 에이전트가 작성한 마크다운 리포트를 읽고 종합하여 실행 가능한 테스트 케이스를 도출합니다.
+에이전트 리포트를 읽고 실행 가능한 테스트케이스를 도출합니다.
 
-분석 순서:
-1. read_report로 모든 리포트를 읽으세요 (순서 권장):
-   - "findings-summary" : 모든 에이전트의 실시간 발견 목록
-   - "ui"               : UI/화면 구조 분석 결과
-   - "ui-source"        : 3-tier 소스 체인 (UI→BFF→Backend) 분석 결과
-   - "frontend"         : Vue 컴포넌트·API 클라이언트 분석 결과
-   - "backend"          : 백엔드 컨트롤러·서비스·DB 테이블 분석 결과
-   - "db"               : 테스트 데이터 조회 결과
-2. 읽은 내용을 종합하여 테스트 케이스를 도출하세요.
-3. report_findings({ findings: { testCases: [...] } })로 최종 결과를 제출하세요.
+1. read_report 순서: findings-summary → ui → ui-source → frontend → backend → db
+2. 종합하여 테스트케이스 도출
+3. report_findings({ findings: { testCases: [...] } }) 제출
 
-테스트 케이스 형식 (findings.testCases 배열 원소):
-{
-  "name": "[화면명] - [시나리오]",
-  "steps": [{"action": "navigate|click|type|key|scroll|screenshot", "selector"?: "...", "text"?: "...", "url"?: "...", "key"?: "..."}],
-  "testData": {},
-  "expectedResult": "..."
-}
+테스트케이스 형식:
+{ "name":"[화면]-[시나리오]", "steps":[{"action":"navigate|click|type|key|scroll|screenshot","selector"?:"","text"?:"","url"?:"","key"?:""}], "testData":{}, "expectedResult":"" }
 
-포함할 케이스 유형:
-1. 정상 경로 (Happy path) — 유효 데이터로 성공
-2. 유효성 오류 — 필수값 누락, 형식 오류
-3. 권한/인증 경계 (해당하는 경우)
-4. 경계값 — 빈 목록, 최대값
+케이스 유형: 정상경로 / 유효성오류(필수값누락·형식오류) / 권한/인증 / 경계값(빈목록·최대값)
+스킵된 에이전트는 무시, 확인된 정보만으로 반드시 도출.`,
+    userMessage: `분析 URL: ${url}
 
-리포트가 없는 에이전트(스킵된 경우)는 무시하고, 확인된 정보만으로 반드시 테스트케이스를 도출하세요.`,
-    userMessage: `분석 URL: ${url}
-
-read_report 도구로 각 에이전트 리포트를 읽고, 모든 리포트 확인 후 report_findings로 테스트케이스를 제출하세요.`,
+read_report로 각 리포트 읽은 후 report_findings로 테스트케이스 제출.`,
     execTool: async (toolName, input) => {
       if (toolName === "read_report") {
         const fname = input.agent === "findings-summary"
@@ -1475,21 +1258,11 @@ async function runRecordingAgent(tc, index, total) {
     name: "recording",
     label: `레코딩 ${index + 1}/${total}`,
     tools: [...BROWSER_TOOLS, REPORT_TOOL],
-    systemPrompt: `당신은 테스트 케이스를 브라우저에서 직접 실행하는 레코딩 에이전트입니다.
-주어진 단계를 순서대로 실행하세요.
-각 주요 액션 전후에 browser_screenshot으로 진행 상황을 확인하세요.
-완료되면 report_findings({ "completed": true, "summary": "간략 결과" })를 호출하세요.`,
-    userMessage: `테스트 케이스 [${index + 1}/${total}]: ${tc.name}
-
-예상 결과: ${tc.expectedResult || ""}
-
-실행 단계:
-${JSON.stringify(tc.steps, null, 2)}
-
-사용할 테스트 데이터:
-${JSON.stringify(tc.testData || {}, null, 2)}
-
-단계를 순서대로 실행하세요.`,
+    systemPrompt: `테스트 케이스를 브라우저에서 순서대로 실행. 주요 액션 전후 browser_screenshot. 완료 시 report_findings({ "completed": true, "summary": "결과" }).`,
+    userMessage: `[${index + 1}/${total}] ${tc.name}
+예상결과: ${tc.expectedResult || ""}
+단계: ${JSON.stringify(tc.steps)}
+데이터: ${JSON.stringify(tc.testData || {})}`,
     execTool: execBrowser,
     maxTurns: 30,
   });
