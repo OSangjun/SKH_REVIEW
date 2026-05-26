@@ -726,10 +726,14 @@ async function runReplay(
     else
       log("fail", `━━ DOM 텍스트: FAIL — ${domFailed}/${domResults.length} 불일치 ━━`);
     for (const r of domResults) {
-      if (!r.pass)
-        log("fail", `  ✗ [DOM] "${r.text.slice(0, 60)}" — 재생 화면에 없음 (경로: ${r.path})`);
-      else if (r.pathMoved)
-        log("warn", `  ~ [DOM] "${r.text.slice(0, 60)}" — 위치 변경됨 (경로 불일치)`);
+      if (!r.pass) {
+        if (r.reason === 'text-mismatch') {
+          const actual = (r.actualTexts || []).map(t => `"${t.slice(0, 40)}"`).join(', ');
+          log("fail", `  ✗ [DOM] 텍스트 불일치 (경로: ${r.path}) 기대: "${r.text.slice(0, 40)}" → 실제: ${actual}`);
+        } else {
+          log("fail", `  ✗ [DOM] 경로 없음: "${r.text.slice(0, 60)}" (경로: ${r.path})`);
+        }
+      }
     }
   }
 

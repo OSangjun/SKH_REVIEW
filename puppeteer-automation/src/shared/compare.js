@@ -217,25 +217,30 @@ function compareTriggerMappings(events, replayTriggerMap) {
 
 // Compare recorded vs replay DOM text snapshots.
 // Each entry: { path, text }. Matching strategy:
-//   1. Exact path+text match → pass
-//   2. Same text found at a different path (element moved) → pass with pathMoved flag
-//   3. Text not found anywhere in replay → fail
+//   1. Same path, same text → pass
+//   2. Same path, different text → fail (reason: 'text-mismatch', actualTexts: [...])
+//   3. Path not found in replay → fail (reason: 'path-missing')
 function compareDomSnapshots(recorded, replayed) {
   if (!recorded || recorded.length === 0) return [];
   const byPath = new Map();
-  const byText = new Map();
   for (const r of (replayed || [])) {
     if (!byPath.has(r.path)) byPath.set(r.path, []);
     byPath.get(r.path).push(r);
-    if (!byText.has(r.text)) byText.set(r.text, []);
-    byText.get(r.text).push(r);
   }
   return recorded.map((r) => {
-    const atPath = (byPath.get(r.path) ?? []).find((e) => e.text === r.text);
-    if (atPath) return { path: r.path, text: r.text, pass: true, rect: atPath.rect ?? null };
-    const atOther = (byText.get(r.text) ?? [])[0];
-    if (atOther) return { path: r.path, text: r.text, pass: true, pathMoved: true, rect: atOther.rect ?? null };
-    return { path: r.path, text: r.text, pass: false, rect: null, recRect: r.rect ?? null };
+    const atPath = byPath.get(r.path) ?? [];
+    if (atPath.length === 0) {
+      return { path: r.path, text: r.text, pass: false, reason: 'path-missing', rect: null, recRect: r.rect ?? null };
+    }
+    const exact = atPath.find((e) => e.text === r.text);
+    if (exact) {
+      return { path: r.path, text: r.text, pass: true, rect: exact.rect ?? null };
+    }
+    return {
+      path: r.path, text: r.text, pass: false, reason: 'text-mismatch',
+      actualTexts: atPath.map((e) => e.text),
+      rect: atPath[0].rect ?? null, recRect: r.rect ?? null,
+    };
   });
 }
 

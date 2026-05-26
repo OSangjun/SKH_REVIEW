@@ -1200,13 +1200,14 @@
   // ── Replay result badge ───────────────────────────────────────────────────────
   function renderDomHighlights(domResults) {
     activeDomHighlights = (domResults || [])
-      .filter((r) => !r.pass || r.pathMoved)
+      .filter((r) => !r.pass)
       .map((r) => {
-        if (!r.pass) {
-          // Use the recording-side rect as a "ghost" to show where it was
-          return { kind: 'fail-ghost', text: r.text, rect: r.recRect ?? null };
+        if (r.reason === 'text-mismatch') {
+          // Show actual replay position with text mismatch label
+          return { kind: 'warn', text: `${r.text} → ${(r.actualTexts || [])[0] || '?'}`, rect: r.rect ?? null };
         }
-        return { kind: 'warn', text: r.text, rect: r.rect };
+        // path-missing: use recording-side rect as ghost
+        return { kind: 'fail-ghost', text: r.text, rect: r.recRect ?? null };
       })
       .filter((h) => h.rect && h.rect.w > 0 && h.rect.h > 0);
     _drawDomHighlights();
@@ -1219,7 +1220,6 @@
     const jsFail      = (jsErrors       || []).length;
     const triggerFail = (triggerResults || []).filter(r => !r.pass).length;
     const domFail     = (domResults     || []).filter(r => !r.pass).length;
-    const domWarn     = (domResults     || []).filter(r => r.pass && r.pathMoved).length;
     const totalFail   = failed;  // already includes all failure types from server
 
     if (total === 0 && jsFail === 0) {
@@ -1235,7 +1235,6 @@
       text = `SUCCESS  ${passed}/${total}`;
       if (toastResults && toastResults.length) extras.push(`${ICON('bell')} ${toastResults.length}`);
       if (triggerResults && triggerResults.length) extras.push(`${ICON('link')} ${triggerResults.length}`);
-      if (domWarn) extras.push(`DOM~${domWarn}`);
     } else if (passed === 0 && totalFail > 0) {
       cls  = 'fail';
       iconSvg = ICON('xCircle');
@@ -1248,7 +1247,6 @@
       iconSvg = ICON('xCircle');
       text = `PARTIAL  ${passed} 성공 / ${totalFail} 실패`;
       if (domFail) extras.push(`DOM×${domFail}`);
-      if (domWarn) extras.push(`DOM~${domWarn}`);
     }
 
     resultBadge.classList.add(cls);
