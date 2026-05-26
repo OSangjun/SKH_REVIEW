@@ -44,12 +44,21 @@ function sleep(ms) {
 async function captureDomSnapshot(page) {
   return page.evaluate(() => {
     const SKIP_TAGS = new Set(["script", "style", "noscript", "head", "meta", "link"]);
+    // 동적으로 생성되는 ID(Element Plus, 기타 프레임워크)를 경로 앵커에서 제외.
+    // 숫자 3자리 이상 포함 / 알려진 프레임워크 접두사 / 문자 외 시작 → 불안정 ID로 판단.
+    function isStableId(id) {
+      if (!id) return false;
+      if (!/^[a-zA-Z]/.test(id)) return false;
+      if (/[0-9]{3,}/.test(id)) return false;
+      if (/^(el-id|el-popper|el-overlay|el-select|el-input|el-form|el-table|el-dialog|el-tooltip|el-cascader|el-upload|rc-|ant-|mat-|mdc-|cdk-|ng-|vue-|ember|p-|:r)/.test(id)) return false;
+      return true;
+    }
     function buildPath(el) {
       const parts = [];
       let cur = el;
       while (cur && cur !== document.body && cur.tagName) {
         const tag = cur.tagName.toLowerCase();
-        if (cur.id) { parts.unshift("#" + cur.id); break; }
+        if (cur.id && isStableId(cur.id)) { parts.unshift("#" + cur.id); break; }
         const sibs = cur.parentElement
           ? Array.from(cur.parentElement.children).filter((c) => c.tagName === cur.tagName)
           : [cur];
