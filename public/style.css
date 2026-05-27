@@ -1348,14 +1348,16 @@ body.log-collapsed #log-body { display: none; }
 @keyframes ov-spin { to { transform: rotate(360deg); } }
 
 .ov-agent-tokens {
-  font-size: 9px;
-  color: var(--text-dim);
+  font-size: 9.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  flex-shrink: 0;
-  margin-left: auto;
-  padding-left: 6px;
-  opacity: 0.75;
+  color: rgba(255,255,255,.35);
+  letter-spacing: .2px;
+  min-height: 12px;
+  transition: color .3s;
+}
+.ov-agent-tokens:not(:empty) {
+  color: rgba(148,210,255,.7);
 }
 
 /* ── 말풍선 ────────────────────────────────────────────────────────────── */

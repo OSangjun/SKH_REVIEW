@@ -875,14 +875,6 @@
 
     row.classList.toggle('running', cls === 'running');
 
-    if (status === 'done' && inputTokens) {
-      const tokEl = row.querySelector('.ov-agent-tokens');
-      if (tokEl) {
-        const cost = calcCost(inputTokens, outputTokens || 0);
-        tokEl.textContent = `↑${fmtTok(inputTokens)} ↓${fmtTok(outputTokens || 0)}  $${cost.toFixed(4)}`;
-      }
-    }
-
     if (message && status !== 'pending') showBubble(row, message, toAgent, msgDir);
   }
 
