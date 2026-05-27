@@ -725,6 +725,9 @@ const ANSWER_QUERY_TOOL = {
 async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurns = 40, execTool, bus }) {
   agentMsg(name, label, "start", "시작");
 
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
   const busTools = bus ? [ASK_AGENT_TOOL, ANSWER_QUERY_TOOL] : [];
   const allTools = [...tools, ...busTools];
   const messages = [{ role: "user", content: userMessage }];
@@ -739,6 +742,10 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
       tools: allTools,
       messages,
     });
+    if (response.usage) {
+      totalInputTokens += response.usage.input_tokens;
+      totalOutputTokens += response.usage.output_tokens;
+    }
     messages.push({ role: "assistant", content: response.content });
 
     const hasToolUse = response.content.some((b) => b.type === "tool_use");
@@ -808,7 +815,7 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
 
       // ── report_findings ──
       if (block.name === "report_findings") {
-        agentMsg(name, label, "done", "분析 완료");
+        agentMsg(name, label, "done", "분析 완료", { inputTokens: totalInputTokens, outputTokens: totalOutputTokens });
         if (bus) {
           await bus.waitAndDrainUntilPredecessorsDone(name, label);
           bus.closeAgent(name, label);
@@ -816,7 +823,7 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
         toolResults.push({ type: "tool_result", tool_use_id: block.id, content: [{ type: "text", text: "findings submitted" }] });
         messages.push({ role: "user", content: toolResults });
         finished = true;
-        return block.input.findings || {};
+        return { ...(block.input.findings || {}), inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
       }
 
       // ── ask_agent: 다른 에이전트에게 질의 (응답 대기) ──
@@ -880,12 +887,12 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
     messages.push({ role: "user", content: userContent });
   }
 
-  agentMsg(name, label, "done", "완료");
+  agentMsg(name, label, "done", "완료", { inputTokens: totalInputTokens, outputTokens: totalOutputTokens });
   if (bus) {
     await bus.waitAndDrainUntilPredecessorsDone(name, label);
     bus.closeAgent(name, label);
   }
-  return {};
+  return { inputTokens: totalInputTokens, outputTokens: totalOutputTokens };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1247,9 +1254,11 @@ read_report로 각 리포트 읽은 후 report_findings로 테스트케이스 �
   });
 
   const testCases = (leadResult.testCases) || [];
-  agentMsg("lead", "리드 에이전트", "done", `테스트 케이스 ${testCases.length}개 도출 완료`);
+  const leadIn = leadResult.inputTokens || 0;
+  const leadOut = leadResult.outputTokens || 0;
+  agentMsg("lead", "리드 에이전트", "done", `테스트 케이스 ${testCases.length}개 도출 완료`, { inputTokens: leadIn, outputTokens: leadOut });
   send({ type: "analyze-synthesis", testCases: testCases.map((tc) => ({ name: tc.name, expectedResult: tc.expectedResult })) });
-  return testCases;
+  return { testCases, inputTokens: leadIn, outputTokens: leadOut };
 }
 
 // ── 6. Recording 에이전트 ─────────────────────────────────────────────────────
@@ -1258,7 +1267,7 @@ async function runRecordingAgent(tc, index, total) {
   agentMsg("recording", `레코딩 ${index + 1}/${total}`, "start", tc.name);
   startRecording(tc.name);
 
-  await runAgent({
+  const agentResult = await runAgent({
     name: "recording",
     label: `레코딩 ${index + 1}/${total}`,
     tools: [...BROWSER_TOOLS, REPORT_TOOL],
@@ -1287,17 +1296,19 @@ ${JSON.stringify(tc.testData || {}, null, 2)}
     execTool: execBrowser,
     maxTurns: 30,
   });
+  const recIn  = agentResult.inputTokens  || 0;
+  const recOut = agentResult.outputTokens || 0;
 
   const id = await stopRecording();
   if (id) {
     log("success", `[레코딩] 저장: ${tc.name} (id=${id})`);
     send({ type: "recordings", list: dbAllMeta() });
-    agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", `저장 완료 (id=${id})`);
-    return id;
+    agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", `저장 완료 (id=${id})`, { inputTokens: recIn, outputTokens: recOut });
+    return { id, inputTokens: recIn, outputTokens: recOut };
   }
   log("warn", `[레코딩] 이벤트 없음 — 미저장: ${tc.name}`);
-  agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", "이벤트 없음 (미저장)");
-  return null;
+  agentMsg("recording", `레코딩 ${index + 1}/${total}`, "done", "이벤트 없음 (미저장)", { inputTokens: recIn, outputTokens: recOut });
+  return { id: null, inputTokens: recIn, outputTokens: recOut };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1319,6 +1330,8 @@ async function runAnalysis(url) {
   resetFindings();
 
   let createdCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   send({ type: "analyze-started", url });
   log("info", `━━ 분석 시작: ${url} ━━`);
 
@@ -1329,18 +1342,26 @@ async function runAnalysis(url) {
 
     // ── Phase 1: 에이전트 팀 병렬 분석 (UI · 소스 · Frontend · Backend · DB) ──
     const { uiF, uiSourceF, frontendF, backendF, dbF } = await runAgentTeam(url, pageSource);
+    for (const f of [uiF, uiSourceF, frontendF, backendF, dbF]) {
+      totalInputTokens  += f.inputTokens  || 0;
+      totalOutputTokens += f.outputTokens || 0;
+    }
 
     if (state.analysisCancelled) throw new Error("취소됨");
 
     // ── Phase 2: Lead 에이전트 취합 → 테스트 케이스 도출 → 레코딩 ─────────────
     phaseMsg(2, 2, "테스트 케이스 도출 → 레코딩");
-    const testCases = await runLeadAgent(url);
+    const { testCases, inputTokens: leadIn = 0, outputTokens: leadOut = 0 } = await runLeadAgent(url);
+    totalInputTokens  += leadIn;
+    totalOutputTokens += leadOut;
 
     for (let i = 0; i < testCases.length; i++) {
       if (state.analysisCancelled) break;
-      const id = await runRecordingAgent(testCases[i], i, testCases.length)
+      const recResult = await runRecordingAgent(testCases[i], i, testCases.length)
         .catch((e) => { agentMsg("recording", `레코딩 ${i + 1}`, "error", e.message); return null; });
-      if (id) createdCount++;
+      if (recResult?.id) createdCount++;
+      totalInputTokens  += recResult?.inputTokens  || 0;
+      totalOutputTokens += recResult?.outputTokens || 0;
     }
 
     if (_recHandler) {
@@ -1354,7 +1375,7 @@ async function runAnalysis(url) {
   } finally {
     state.isAnalyzing = false;
     log(createdCount > 0 ? "success" : "warn", `━━ 분석 완료: ${createdCount}개 테스트 케이스 생성 ━━`);
-    send({ type: "analyze-done", created: createdCount });
+    send({ type: "analyze-done", created: createdCount, totalInputTokens, totalOutputTokens });
   }
 }
 

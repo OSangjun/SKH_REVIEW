@@ -1347,6 +1347,17 @@ body.log-collapsed #log-body { display: none; }
 .ov-agent-icon.error   { color: var(--rec-color); }
 @keyframes ov-spin { to { transform: rotate(360deg); } }
 
+.ov-agent-tokens {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 6px;
+  opacity: 0.75;
+}
+
 /* ── 말풍선 ────────────────────────────────────────────────────────────── */
 .ov-agent-bubble {
   position: absolute;

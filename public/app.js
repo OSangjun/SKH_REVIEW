@@ -66,6 +66,10 @@
   const urlTreeBody   = document.getElementById('url-tree-body');
   const urlTreeCount  = document.getElementById('url-tree-count');
 
+  // ── Token helpers ─────────────────────────────────────────────────────────────
+  function calcCost(inp, out) { return (inp * 3 + out * 15) / 1_000_000; }
+  function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+
   // ── State ─────────────────────────────────────────────────────────────────────
   let ws            = null;
   let wsReady       = false;
@@ -367,7 +371,7 @@
       }
 
       case 'analyze-agent':
-        updateAgentRow(msg.agent, msg.status, msg.message || '', msg.toAgent || null, msg.msgDir || null);
+        updateAgentRow(msg.agent, msg.status, msg.message || '', msg.toAgent || null, msg.msgDir || null, msg.inputTokens, msg.outputTokens);
         if (msg.status === 'progress') {
           appendLog('info', null, `[${msg.label}] ${msg.message}`);
         }
@@ -404,7 +408,7 @@
         appendLog('info', null, `레코딩 [${msg.index}/${msg.total}]: ${msg.name}`);
         break;
 
-      case 'analyze-done':
+      case 'analyze-done': {
         isAnalyzing = false;
         analyzeBtn.disabled = currentPageUrl === '';
         replayBtn.disabled  = selectedId === null;
@@ -414,9 +418,13 @@
         hideOverlay();
         ovTitle.innerHTML   = `${ICON('play')} 재생 중`;
         ovBar.style.width   = '0%';
-        setStatus(`분석 완료 — ${msg.created}개 테스트 케이스 생성됨`);
+        const inp = msg.totalInputTokens || 0;
+        const out = msg.totalOutputTokens || 0;
+        const tokStr = inp ? ` | ↑${fmtTok(inp)} ↓${fmtTok(out)}  $${calcCost(inp, out).toFixed(4)}` : '';
+        setStatus(`분析 완료 — ${msg.created}개 테스트 케이스 생성됨${tokStr}`);
         document.getElementById('statusbar')?.classList.remove('replaying');
         break;
+      }
 
       case 'analyze-error':
         isAnalyzing = false;
@@ -794,6 +802,8 @@
       if (icon)   { icon.className = 'ov-agent-icon pending'; icon.textContent = '○'; }
       if (msg)    msg.textContent = '대기 중';
       if (bubble) { bubble.innerHTML = ''; bubble.className = 'ov-agent-bubble hidden'; }
+      const tokEl = row.querySelector('.ov-agent-tokens');
+      if (tokEl) tokEl.textContent = '';
       row.classList.remove('running');
     });
     Object.keys(_bubbleTimers).forEach(k => {
@@ -838,7 +848,7 @@
     _bubbleTimers[agent] = { fade: fadeTimer, show: null };
   }
 
-  function updateAgentRow(agent, status, message, toAgent = null, msgDir = null) {
+  function updateAgentRow(agent, status, message, toAgent = null, msgDir = null, inputTokens, outputTokens) {
     const row = ovAgents.querySelector(`[data-agent="${CSS.escape(agent)}"]`);
     if (!row) return;
     const icon = row.querySelector('.ov-agent-icon');
@@ -852,6 +862,14 @@
     if (msg) msg.textContent = message.slice(0, 50);
 
     row.classList.toggle('running', cls === 'running');
+
+    if (status === 'done' && inputTokens) {
+      const tokEl = row.querySelector('.ov-agent-tokens');
+      if (tokEl) {
+        const cost = calcCost(inputTokens, outputTokens || 0);
+        tokEl.textContent = `↑${fmtTok(inputTokens)} ↓${fmtTok(outputTokens || 0)}  $${cost.toFixed(4)}`;
+      }
+    }
 
     if (message && status !== 'pending') showBubble(row, message, toAgent, msgDir);
   }
