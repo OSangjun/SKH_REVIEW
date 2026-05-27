@@ -851,6 +851,18 @@
   function updateAgentRow(agent, status, message, toAgent = null, msgDir = null, inputTokens, outputTokens) {
     const row = ovAgents.querySelector(`[data-agent="${CSS.escape(agent)}"]`);
     if (!row) return;
+
+    if (status === 'tokens') {
+      if (inputTokens) {
+        const tokEl = row.querySelector('.ov-agent-tokens');
+        if (tokEl) {
+          const cost = calcCost(inputTokens, outputTokens || 0);
+          tokEl.textContent = `↑${fmtTok(inputTokens)} ↓${fmtTok(outputTokens || 0)}  $${cost.toFixed(4)}`;
+        }
+      }
+      return;
+    }
+
     const icon = row.querySelector('.ov-agent-icon');
     const msg  = row.querySelector('.ov-agent-msg');
     const cls  = (status === 'start' || status === 'progress') ? 'running' : status;

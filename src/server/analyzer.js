@@ -745,6 +745,7 @@ async function runAgent({ name, label, tools, systemPrompt, userMessage, maxTurn
     if (response.usage) {
       totalInputTokens += response.usage.input_tokens;
       totalOutputTokens += response.usage.output_tokens;
+      agentMsg(name, label, "tokens", "", { inputTokens: totalInputTokens, outputTokens: totalOutputTokens });
     }
     messages.push({ role: "assistant", content: response.content });
 
