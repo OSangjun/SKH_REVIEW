@@ -970,46 +970,50 @@ send_finding으로 발견사항 전달 후 report_findings 호출.`,
 // 검사하도록 강제).
 async function runUISourceAgent(url, bus) {
   if (!gitlab.isReady()) {
-    agentMsg("ui-source", "UI 소스 분석", "done", "GitLab 미설정 — 스킵");
+    agentMsg("ui-source", "UI 소스 분析", "done", "GitLab 미설정 — 스킵");
     if (bus) bus.closeAgent("ui-source", "UI 소스 분析");
     return { skipped: true, levels: [], apiEndpoints: [] };
   }
 
-  const uiProject = projectFromUrl(url);
-  if (!uiProject) {
-    agentMsg("ui-source", "UI 소스 분석", "done", "URL에서 프로젝트 도출 실패 — 스킵");
+  const projectIds = gitlab.getProjectIds();
+  if (!projectIds.length) {
+    agentMsg("ui-source", "UI 소스 분析", "done", "GITLAB_PROJECT 미설정 — 스킵");
     if (bus) bus.closeAgent("ui-source", "UI 소스 분析");
     return { skipped: true, levels: [], apiEndpoints: [] };
   }
 
-  const uiBranch = branchFor(uiProject);
-  const urlPath  = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+  const urlPath     = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+  const hintProject = projectFromUrl(url);
+  const hintBranch  = hintProject ? branchFor(hintProject) : null;
 
   agentMsg(
-    "ui-source", "UI 소스 분석", "progress",
-    `프로젝트=${uiProject}, 브랜치=${uiBranch}, 경로=${urlPath}`,
+    "ui-source", "UI 소스 분析", "progress",
+    `프로젝트 IDs=[${projectIds.join(",")}], 경로=${urlPath}`,
   );
 
   return runAgent({
-    name: "ui-source", label: "UI 소스 분석",
+    name: "ui-source", label: "UI 소스 분析",
     bus,
     tools: [...GITLAB_IN_TOOLS, SEND_FINDING_TOOL, WRITE_REPORT_TOOL, REPORT_TOOL],
     systemPrompt: `당신은 3-tier 소스 추적 에이전트입니다.
-URL origin 다음 첫 path 세그먼트가 프로젝트명. 브랜치는 get_branch_for_project.
+GitLab 프로젝트 IDs: [${projectIds.join(", ")}]
+브랜치: get_branch_for_project 로 조회 (없으면 main).
+모든 단계에서 프로젝트를 찾지 못하면 다음 ID로 전환 — 포기 금지.
 
-[L0 — UI Vue] 프로젝트="${uiProject}", 브랜치="${uiBranch}", 경로="${urlPath}"
-1. gitlab_list_files_in 루트 파악
-2. gitlab_search_code_in으로 라우터에서 "${urlPath}" 검색 → 매핑 컴포넌트 읽기
+[L0 — UI Vue] 경로="${urlPath}"
+1. 각 프로젝트에서 gitlab_search_code_in으로 Vue Router에서 "${urlPath}" 검색 (결과 없으면 다음 프로젝트)
+2. 매핑 컴포넌트 gitlab_get_file_in으로 읽기
 3. import 추적 → API 클라이언트(src/api/) 엔드포인트 추출
 4. send_finding(findingType:"api_endpoint", description에 method/path/파라미터)
 
 [L1 — 중간계층] 각 L0 엔드포인트 *모두*:
-1. derive_project_from_url → get_branch_for_project
-2. gitlab_search_code_in으로 핸들러(@GetMapping 등) 검색
-3. 다음 단계 API(RestTemplate/WebClient/Feign) 추출 → send_finding
+1. derive_project_from_url 시도 → 실패유미발견 시 각 프로젝트 ID 순회
+2. get_branch_for_project
+3. gitlab_search_code_in으로 핸들러(@GetMapping 등) 검색
+4. 다음 단계 API(RestTemplate/WebClient/Feign) 추출 → send_finding
 
 [L2 — 백엔드] 각 L1 엔드포인트 *모두*:
-1. derive_project_from_url → get_branch_for_project
+1. derive_project_from_url 시도 → 실패유미발견 시 각 프로젝트 ID 순회
 2. 컨트롤러→서비스→매퍼/리포지터리 추적
 3. 비즈니스로직/DB테이블/권한/에러 → send_finding
 
@@ -1018,9 +1022,9 @@ write_report 전: ask_agent("db","[시나리오]:[필요 조건값/ID]")로 테�
 완료:
 1. write_report: # UI 소스 분析 리포트 / ## L0 / ## L1 / ## L2 / ## API목록 / ## 비즈니스로직 / ## 테스트 케이스별 필요 데이터
 2. report_findings: { levels:[{level,project,branch,files,apiEndpoints},...], apiEndpoints:[...] }`,
-    userMessage: `URL: ${url} / 프로젝트: ${uiProject} / 브랜치: ${uiBranch} / 경로: ${urlPath}
+    userMessage: `URL: ${url} / 경로: ${urlPath} / 프로젝트 IDs: [${projectIds.join(", ")}]${hintProject ? ` / URL 힌트: ${hintProject}(${hintBranch})` : ""}
 
-L0→L1→L2 절차로 분析, send_finding으로 중간 발견 전달, 완료 후 report_findings 호출.`,
+각 프로젝트를 순회하며 L0→L1→L2 절차로 분析. send_finding으로 중간 발견 전달, 완료 후 report_findings 호출.`,
     execTool: execGitlab,
     maxTurns: 60,
   });
